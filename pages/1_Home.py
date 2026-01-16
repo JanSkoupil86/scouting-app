@@ -1,29 +1,29 @@
 import streamlit as st
+import pandas as pd
 from src.data import load_csv
 
 st.title("Home")
 
-CSV_PATH = "data/Wyscout_League_Export.csv"
-
 st.markdown(
     """
     ### Scouting App
-    This application is designed for **individual player scouting** using Wyscout data exports.
-
-    **Workflow**
-    1. Load a league export
-    2. Filter players
-    3. Analyse individual profiles
+    Upload a Wyscout league export to begin scouting individual players.
     """
 )
 
-st.subheader("Data status")
+uploaded_file = st.file_uploader(
+    "Upload Wyscout CSV",
+    type=["csv"],
+    accept_multiple_files=False,
+)
 
-try:
-    df = load_csv(CSV_PATH)
-    st.success(f"Data loaded successfully — {len(df):,} rows")
-except FileNotFoundError:
-    st.warning(
-        "No data file found yet.\n\n"
-        "Please upload `Wyscout_League_Export.csv` into the `data/` folder."
-    )
+if uploaded_file is None:
+    st.info("Please upload a CSV file to continue.")
+    st.stop()
+
+df = pd.read_csv(uploaded_file)
+df = load_csv(uploaded_file)
+
+st.session_state["data"] = df
+
+st.success(f"Data loaded successfully — {len(df):,} rows")
