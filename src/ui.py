@@ -1,47 +1,70 @@
 import streamlit as st
 import pandas as pd
 
+def _unique_sorted(series: pd.Series) -> list[str]:
+    s = series.dropna().astype(str).str.strip()
+    s = s[(s != "") & (s.str.lower() != "nan")]
+    return sorted(s.unique().tolist())
+
 def sidebar_controls(df: pd.DataFrame):
+    """
+    Cascading filters:
+      Season -> League -> Team -> Position -> Minutes -> Name
+    Team options are restricted to the selected League (and Season).
+    """
     with st.sidebar:
         st.header("Player Filters")
 
-        # 1) Season FIRST
+        # ----- Season (top-level) -----
         seasons = ["All"]
         if "Season" in df.columns:
-            s = df["Season"].astype(str)
-            s = s[(s != "") & (s.str.lower() != "nan")]
-            seasons += sorted(s.dropna().unique().tolist())
+            seasons += _unique_sorted(df["Season"])
         season = st.selectbox("Season", seasons)
 
-        # 2) League/Competition SECOND
+        # filter df by season for dependent dropdowns
+        df1 = df
+        if season != "All" and "Season" in df1.columns:
+            df1 = df1[df1["Season"].astype(str) == str(season)]
+
+        # ----- League / Competition (depends on season) -----
+        league_col = "Competition" if "Competition" in df1.columns else ("League" if "League" in df1.columns else None)
         leagues = ["All"]
-        if "Competition" in df.columns:
-            leagues += sorted(df["Competition"].dropna().astype(str).unique().tolist())
-        elif "League" in df.columns:
-            leagues += sorted(df["League"].dropna().astype(str).unique().tolist())
+        if league_col:
+            leagues += _unique_sorted(df1[league_col])
         competition = st.selectbox("League", leagues)
 
-        # 3) Minutes
+        # filter df by league for dependent dropdowns
+        df2 = df1
+        if competition != "All" and league_col:
+            df2 = df2[df2[league_col].astype(str) == str(competition)]
+
+        # ----- Team (depends on season + league) -----
+        teams = ["All"]
+        if "Team" in df2.columns:
+            teams += _unique_sorted(df2["Team"])
+        team = st.selectbox("Team", teams)
+
+        # filter df by team for dependent dropdowns (optional but improves Position list)
+        df3 = df2
+        if team != "All" and "Team" in df3.columns:
+            df3 = df3[df3["Team"].astype(str) == str(team)]
+
+        # ----- Position (depends on season + league + team) -----
+        positions = ["All"]
+        if "Position" in df3.columns:
+            positions += _unique_sorted(df3["Position"])
+        position = st.selectbox("Position", positions)
+
+        # ----- Minutes -----
         max_minutes = 0
         if "Minutes played" in df.columns:
             max_minutes = int(pd.to_numeric(df["Minutes played"], errors="coerce").fillna(0).max())
         minutes_min = st.slider("Minimum minutes", 0, max_minutes, 600, 30)
 
-        # 4) Team
-        teams = ["All"]
-        if "Team" in df.columns:
-            teams += sorted(df["Team"].dropna().astype(str).unique().tolist())
-        team = st.selectbox("Team", teams)
-
-        # 5) Position
-        positions = ["All"]
-        if "Position" in df.columns:
-            positions += sorted(df["Position"].dropna().astype(str).unique().tolist())
-        position = st.selectbox("Position", positions)
-
-        # 6) Name search
+        # ----- Name search -----
         name_query = st.text_input("Search player name", "")
 
+    # return signature must match your pages
     return season, competition, minutes_min, team, position, name_query
 
 
