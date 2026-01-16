@@ -87,7 +87,7 @@ sel_df = pd.DataFrame(selected_rows)
 # ----------------------------
 st.subheader("Profiles")
 
-card_fields = ["Team", "Position", "Age", "Minutes played", "Matches played", "Market value"]
+card_fields = ["Team", "Position", "Age", "Minutes played", "Matches played"]
 card_fields = [c for c in card_fields if c in sel_df.columns]
 
 cols = st.columns(len(selected_rows))
