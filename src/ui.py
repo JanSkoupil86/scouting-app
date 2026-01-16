@@ -5,21 +5,21 @@ def sidebar_controls(df: pd.DataFrame):
     with st.sidebar:
         st.header("Player Filters")
 
-        # 1) Season FIRST
+        # 1) Season FIRST (parsed into df["Season"] in app.py)
         seasons = ["All"]
         if "Season" in df.columns:
-            svals = df["Season"].astype(str)
-            svals = svals[svals != ""]
-            seasons += sorted(svals.dropna().unique().tolist())
+            s = df["Season"].astype(str)
+            s = s[(s != "") & (s.lower() != "nan")]
+            seasons += sorted(s.dropna().unique().tolist())
         season = st.selectbox("Season", seasons)
 
-        # 2) Competition/League SECOND
-        competitions = ["All"]
+        # 2) League/Competition SECOND (prefer df["Competition"], fallback df["League"])
+        leagues = ["All"]
         if "Competition" in df.columns:
-            competitions += sorted(df["Competition"].dropna().astype(str).unique().tolist())
+            leagues += sorted(df["Competition"].dropna().astype(str).unique().tolist())
         elif "League" in df.columns:
-            competitions += sorted(df["League"].dropna().astype(str).unique().tolist())
-        competition = st.selectbox("League", competitions)
+            leagues += sorted(df["League"].dropna().astype(str).unique().tolist())
+        competition = st.selectbox("League", leagues)
 
         # 3) Minutes
         max_minutes = 0
@@ -30,18 +30,19 @@ def sidebar_controls(df: pd.DataFrame):
         # 4) Team
         teams = ["All"]
         if "Team" in df.columns:
-            teams += sorted(df["Team"].dropna().unique().tolist())
+            teams += sorted(df["Team"].dropna().astype(str).unique().tolist())
         team = st.selectbox("Team", teams)
 
         # 5) Position
         positions = ["All"]
         if "Position" in df.columns:
-            positions += sorted(df["Position"].dropna().unique().tolist())
+            positions += sorted(df["Position"].dropna().astype(str).unique().tolist())
         position = st.selectbox("Position", positions)
 
         # 6) Name search
         name_query = st.text_input("Search player name", "")
 
+    # IMPORTANT: return exactly 6 values
     return season, competition, minutes_min, team, position, name_query
 
 
