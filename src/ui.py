@@ -9,7 +9,7 @@ def _unique_sorted(series: pd.Series) -> list[str]:
 def sidebar_controls(df: pd.DataFrame):
     """
     Cascading filters:
-      Season -> League -> Team (within selected timeframe) -> Position -> Minutes -> Name
+      Season -> League -> Team (within selected timeframe) -> Main Position -> Minutes -> Name
     """
     with st.sidebar:
         st.header("Player Filters")
@@ -35,9 +35,8 @@ def sidebar_controls(df: pd.DataFrame):
         if competition != "All" and league_col:
             df2 = df2[df2[league_col].astype(str) == str(competition)]
 
-        # ----- Team (use Team within selected timeframe if present) -----
+        # ----- Team (within timeframe preferred) -----
         team_col = "Team within selected timeframe" if "Team within selected timeframe" in df2.columns else "Team"
-
         teams = ["All"]
         if team_col in df2.columns:
             teams += _unique_sorted(df2[team_col])
@@ -47,13 +46,14 @@ def sidebar_controls(df: pd.DataFrame):
         if team != "All" and team_col in df3.columns:
             df3 = df3[df3[team_col].astype(str) == str(team)]
 
-        # ----- Position -----
+        # ----- Position (Main Position preferred) -----
+        pos_col = "Main Position" if "Main Position" in df3.columns else "Position"
         positions = ["All"]
-        if "Position" in df3.columns:
-            positions += _unique_sorted(df3["Position"])
+        if pos_col in df3.columns:
+            positions += _unique_sorted(df3[pos_col])
         position = st.selectbox("Position", positions)
 
-        # ----- Minutes (keep global max for now; can be made dependent later) -----
+        # ----- Minutes -----
         max_minutes = 0
         if "Minutes played" in df.columns:
             max_minutes = int(pd.to_numeric(df["Minutes played"], errors="coerce").fillna(0).max())
@@ -68,10 +68,11 @@ def sidebar_controls(df: pd.DataFrame):
 def player_header(player_row: pd.Series):
     c1, c2, c3, c4, c5 = st.columns(5)
 
-    # Prefer timeframe-team in header too if available
     team_val = player_row.get("Team within selected timeframe", player_row.get("Team", ""))
     c1.metric("Team", str(team_val))
-    c2.metric("Position", str(player_row.get("Position", "")))
+
+    pos_val = player_row.get("Main Position", player_row.get("Position", ""))
+    c2.metric("Position", str(pos_val))
 
     age = player_row.get("Age", None)
     c3.metric("Age", "" if pd.isna(age) else str(int(age)))
