@@ -10,7 +10,36 @@ st.set_page_config(page_title="Compare", layout="wide")
 st.title("Compare")
 
 # ----------------------------
-# Load data (from app uploader)
+# Global controls (TOP of page)
+# ----------------------------
+top_left, top_right = st.columns([1, 1])
+
+with top_left:
+    n_players = st.number_input(
+        "Number of players to compare",
+        min_value=2,
+        max_value=6,
+        value=2,
+        step=1,
+    )
+
+with top_right:
+    # Plotly continuous scales (names)
+    color_scale = st.selectbox(
+        "Color scale",
+        options=[
+            "Blues", "Greens", "Reds", "Purples", "Oranges",
+            "Viridis", "Cividis", "Plasma", "Magma", "Inferno",
+            "Turbo", "RdBu", "RdYlGn",
+        ],
+        index=5,
+        help="Used for percentile heatmaps and radar styling consistency.",
+    )
+
+st.divider()
+
+# ----------------------------
+# Load data
 # ----------------------------
 if "data" not in st.session_state:
     st.warning("No data loaded yet. Go to the **app** page and upload a CSV.")
@@ -21,18 +50,22 @@ if not isinstance(df, pd.DataFrame) or df.empty:
     st.error("Loaded dataset is empty or invalid. Re-upload the CSV on the **app** page.")
     st.stop()
 
-required = ["Player", "Team", "Position", "Minutes played"]
+required = ["Player", "Minutes played"]
 missing = [c for c in required if c not in df.columns]
 if missing:
     st.error(f"Your CSV is missing required columns: {missing}")
     st.stop()
 
-# Normalize key identifiers
-for col in ["Player", "Team", "Position"]:
-    df[col] = df[col].astype(str).str.strip()
+# Prefer timeframe team + main position where available
+team_col = "Team within selected timeframe" if "Team within selected timeframe" in df.columns else "Team"
+pos_col = "Main Position" if "Main Position" in df.columns else "Position"
+
+for col in ["Player", team_col, pos_col]:
+    if col in df.columns:
+        df[col] = df[col].astype(str).str.strip()
 
 # ----------------------------
-# Sidebar filters (reuse Players filters)
+# Sidebar filters (cascading)
 # ----------------------------
 season, competition, minutes_min, team, position, name_query = sidebar_controls(df)
 
@@ -47,7 +80,7 @@ df_f = apply_filters(
 )
 
 if df_f.empty:
-    st.info("No players match the current filters. Adjust Season/League/Minutes/Team/Position.")
+    st.info("No players match the current filters. Adjust Season/League/Team/Position/Minutes.")
     st.stop()
 
 # ----------------------------
@@ -57,7 +90,6 @@ def map_position_group(position_str: str) -> str:
     if not position_str:
         return "OTHER"
     pos = str(position_str).upper()
-
     if "GK" in pos:
         return "GK"
     if any(p in pos for p in ["CB", "LCB", "RCB", "LB", "RB", "LWB", "RWB"]):
@@ -68,107 +100,61 @@ def map_position_group(position_str: str) -> str:
         return "FWD"
     return "OTHER"
 
-
 def to_num(s):
     return pd.to_numeric(s, errors="coerce")
-
 
 def per90(values: pd.Series, minutes: pd.Series) -> pd.Series:
     v = to_num(values)
     m = to_num(minutes).replace(0, np.nan)
     return (v / m) * 90.0
 
-
 def percentile_rank(value, population: pd.Series):
     pop = to_num(population).dropna()
     if pop.empty or pd.isna(value):
         return np.nan
-    # strict percentile; stable with ties
     return round((pop < float(value)).mean() * 100.0, 1)
 
-
-def first_existing_column(candidates: list[str], columns: pd.Index) -> str | None:
-    for c in candidates:
-        if c in columns:
-            return c
-    return None
-
-
-# Metric templates (aliases handle different export naming)
-TEMPLATES = {
-    "Attacker (FWD)": [
-        ("Goals", ["Goals", "Gls"]),
-        ("xG", ["xG", "Expected goals"]),
-        ("Shots", ["Shots", "Shots total"]),
-        ("Assists", ["Assists", "Ast"]),
-        ("xA", ["xA", "Expected assists"]),
-        ("Key passes", ["Key passes", "Key passes total"]),
-        ("Successful dribbles", ["Successful dribbles", "Dribbles successful"]),
-        ("Touches in box", ["Touches in box", "Touches in penalty area"]),
-        ("Progressive runs", ["Progressive runs", "Progressive carries", "Progressive runs total"]),
-        ("Progressive passes", ["Progressive passes", "Progressive passes total"]),
-    ],
-    "Midfielder (MID)": [
-        ("Assists", ["Assists", "Ast"]),
-        ("xA", ["xA", "Expected assists"]),
-        ("Key passes", ["Key passes", "Key passes total"]),
-        ("Passes", ["Passes", "Passes total", "Passes attempted"]),
-        ("Accurate passes %", ["Accurate passes, %", "Pass accuracy %", "Pass accuracy, %"]),
-        ("Progressive passes", ["Progressive passes", "Progressive passes total"]),
-        ("Duels", ["Duels", "Duels total"]),
-        ("Duels won %", ["Duels won, %", "Duels won %"]),
-        ("Interceptions", ["Interceptions", "Interceptions total"]),
-        ("Tackles", ["Tackles", "Tackles total"]),
-    ],
-    "Defender (DEF)": [
-        ("Duels", ["Duels", "Duels total"]),
-        ("Duels won %", ["Duels won, %", "Duels won %"]),
-        ("Aerial duels", ["Aerial duels", "Aerial duels total"]),
-        ("Aerial won %", ["Aerial duels won, %", "Aerial duels won %"]),
-        ("Interceptions", ["Interceptions", "Interceptions total"]),
-        ("Tackles", ["Tackles", "Tackles total"]),
-        ("Clearances", ["Clearances", "Clearances total"]),
-        ("Blocked shots", ["Blocked shots", "Shots blocked"]),
-        ("Progressive passes", ["Progressive passes", "Progressive passes total"]),
-        ("Accurate passes %", ["Accurate passes, %", "Pass accuracy %", "Pass accuracy, %"]),
-    ],
-    "Goalkeeper (GK)": [
-        ("Saves", ["Saves", "Saves total"]),
-        ("Save %", ["Save rate, %", "Save %", "Save percentage"]),
-        ("Goals conceded", ["Goals conceded", "Goals against"]),
-        ("Clean sheets", ["Clean sheets"]),
-        ("Accurate passes %", ["Accurate passes, %", "Pass accuracy %", "Pass accuracy, %"]),
-        ("Long passes", ["Long passes", "Long passes total"]),
-        ("Long passes accurate %", ["Accurate long passes, %", "Long pass accuracy %"]),
-    ],
-}
-
 # ----------------------------
-# Player selection
+# Player selection (enforced N)
 # ----------------------------
 st.subheader("Selection")
-st.caption("Select 2–6 players. Use sidebar filters to narrow the pool.")
+st.caption("Select players after narrowing the pool with sidebar filters.")
 
-df_pick = df_f[["Player", "Team", "Position"]].dropna().copy()
-df_pick["Position group"] = df_pick["Position"].apply(map_position_group)
-df_pick["label"] = df_pick["Player"] + " — " + df_pick["Team"] + " — " + df_pick["Position"]
-label_options = sorted(df_pick["label"].unique().tolist())
+df_pick = df_f[["Player"]].copy()
+if team_col in df_f.columns:
+    df_pick[team_col] = df_f[team_col]
+else:
+    df_pick[team_col] = ""
 
-selected_labels = st.multiselect("Players to compare", label_options, default=[])
+if pos_col in df_f.columns:
+    df_pick[pos_col] = df_f[pos_col]
+else:
+    df_pick[pos_col] = ""
 
-if len(selected_labels) < 2:
-    st.info("Select at least 2 players.")
+df_pick = df_pick.dropna().copy()
+df_pick["label"] = df_pick["Player"] + " — " + df_pick[team_col] + " — " + df_pick[pos_col]
+
+options = sorted(df_pick["label"].unique().tolist())
+
+selected_labels = st.multiselect(
+    f"Players to compare (choose exactly {int(n_players)})",
+    options=options,
+    default=[],
+)
+
+if len(selected_labels) != int(n_players):
+    st.info(f"Please select exactly {int(n_players)} players. Currently selected: {len(selected_labels)}.")
     st.stop()
 
-if len(selected_labels) > 6:
-    st.warning("Please select at most 6 players for readability. Using the first 6 selections.")
-    selected_labels = selected_labels[:6]
-
-# Resolve selected rows
+# Resolve rows
 selected_rows = []
 for lab in selected_labels:
-    p, t, *_ = lab.split(" — ")
-    row = df[(df["Player"] == p.strip()) & (df["Team"] == t.strip())]
+    parts = lab.split(" — ")
+    p_name = parts[0].strip()
+    p_team = parts[1].strip() if len(parts) > 1 else ""
+    row = df[(df["Player"] == p_name)]
+    if team_col in df.columns and p_team:
+        row = row[row[team_col] == p_team]
     if not row.empty:
         selected_rows.append(row.iloc[0])
 
@@ -178,70 +164,54 @@ if sel_df.empty:
     st.stop()
 
 sel_df = sel_df.copy()
-sel_df["Position group"] = sel_df["Position"].apply(map_position_group)
+sel_df["Position group"] = sel_df[pos_col].apply(map_position_group)
 
+# Reference player determines peer group position group
 ref_label = st.selectbox(
-    "Reference player (peer group position group defaults to this player)",
-    options=[f"{r['Player']} ({r['Team']})" for _, r in sel_df.iterrows()],
+    "Reference player (peer-group position group defaults to this player)",
+    options=[f"{r['Player']} ({r.get(team_col,'')})" for _, r in sel_df.iterrows()],
     index=0,
 )
-ref_player_name = ref_label.split(" (")[0]
-ref_group = sel_df[sel_df["Player"] == ref_player_name].iloc[0]["Position group"]
+ref_player = ref_label.split(" (")[0]
+ref_group = sel_df[sel_df["Player"] == ref_player].iloc[0]["Position group"]
 
-peer_group_mode = st.radio(
-    "Peer group definition for percentiles",
-    options=[
-        f"Same position group as reference ({ref_group})",
-        "All positions (no grouping)",
-    ],
+peer_mode = st.radio(
+    "Peer group for percentiles",
+    options=[f"Same position group as reference ({ref_group})", "All positions"],
     index=0,
-    horizontal=False,
+    horizontal=True,
 )
 
-# ----------------------------
-# Layout controls
-# ----------------------------
-left, right = st.columns([1, 1])
+# Peer pool defined by current filters (df_f) + optional position group restriction
+peer_pool = df_f.copy()
+peer_pool["Position group"] = peer_pool[pos_col].apply(map_position_group)
+if peer_mode.startswith("Same position group"):
+    peer_pool = peer_pool[peer_pool["Position group"] == ref_group]
 
-with left:
-    template_choice = st.selectbox(
-        "Metric template",
-        options=list(TEMPLATES.keys()),
-        index=0,
-        help="Templates are role-based. We will automatically skip metrics missing from your dataset.",
-    )
+st.caption(f"Peer pool size: {len(peer_pool):,}")
 
-with right:
-    max_metrics = st.slider("Max metrics shown (radar readability)", 6, 12, 10, 1)
-
-# Build metrics list from template, resolving actual columns
-template = TEMPLATES[template_choice]
-resolved = []
-for label, aliases in template:
-    col = first_existing_column(aliases, df.columns)
-    if col:
-        resolved.append((label, col))
-
-if not resolved:
-    st.warning("None of the template metrics exist in your dataset. We can map your column names next.")
-    st.dataframe(df.head(20), use_container_width=True)
-    st.stop()
-
-resolved = resolved[:max_metrics]
+st.divider()
 
 # ----------------------------
-# Profiles row
+# Profiles
 # ----------------------------
 st.subheader("Profiles")
 
-card_fields = ["Team", "Position", "Position group", "Age", "Minutes played", "Matches played", "Market value"]
-card_fields = [c for c in card_fields if c in sel_df.columns]
+profile_fields = [
+    team_col,
+    pos_col,
+    "Age",
+    "Minutes played",
+    "Matches played",
+    "Market value",
+]
+profile_fields = [c for c in profile_fields if c in sel_df.columns]
 
 cols = st.columns(len(sel_df))
 for i, c in enumerate(cols):
     with c:
         st.markdown(f"### {sel_df.iloc[i]['Player']}")
-        for f in card_fields:
+        for f in profile_fields:
             v = sel_df.iloc[i].get(f, "")
             if f in ["Minutes played", "Matches played", "Age"] and pd.notna(v):
                 try:
@@ -258,78 +228,65 @@ for i, c in enumerate(cols):
 st.divider()
 
 # ----------------------------
-# Peer pool for percentiles
+# Metrics configuration
 # ----------------------------
-peer_pool = df_f.copy()
-peer_pool["Position group"] = peer_pool["Position"].apply(map_position_group)
+st.subheader("Scouting metrics")
 
-if peer_group_mode.startswith("Same position group"):
-    peer_pool = peer_pool[peer_pool["Position group"] == ref_group]
+# A conservative default set (works for most outfield players)
+candidate_totals = [
+    "Goals", "Assists", "xG", "xA", "Shots", "Key passes",
+    "Successful dribbles", "Progressive passes", "Progressive runs",
+    "Interceptions", "Tackles", "Duels",
+]
+available_totals = [c for c in candidate_totals if c in df.columns]
 
-st.caption(f"Peer pool size: {len(peer_pool):,}")
+if not available_totals:
+    st.info("No common metrics found in this dataset. We can map your exact Wyscout columns next.")
+    st.stop()
+
+selected_totals = st.multiselect(
+    "Select total metrics (we will convert to per 90 automatically)",
+    options=available_totals,
+    default=available_totals[:8],
+)
+
+if not selected_totals:
+    st.info("Select at least one metric.")
+    st.stop()
 
 # ----------------------------
-# Build per-90 value table and percentile table
+# Build per90 + percentile tables
 # ----------------------------
-minutes_col = "Minutes played"
-metric_labels = [m[0] for m in resolved]
-metric_cols = [m[1] for m in resolved]
-
-# Per-90 table
-per90_tbl = pd.DataFrame(index=metric_labels)
-pct_tbl = pd.DataFrame(index=metric_labels)
+per90_tbl = pd.DataFrame(index=[f"{m} per 90" for m in selected_totals])
+pct_tbl = pd.DataFrame(index=[f"{m} per 90" for m in selected_totals])
 
 for _, r in sel_df.iterrows():
-    pname = f"{r['Player']} ({r['Team']})"
-    mins = r.get(minutes_col, np.nan)
+    col_name = f"{r['Player']} ({r.get(team_col,'')})"
+    mins = r.get("Minutes played", np.nan)
 
     per90_vals = []
     pct_vals = []
 
-    for label, col in resolved:
-        # If column looks like a percentage column, treat as raw
-        is_pct = "%" in label or str(col).strip().endswith("%") or "% " in str(col) or ", %" in str(col)
+    for m in selected_totals:
+        v = per90(pd.Series([r.get(m, np.nan)]), pd.Series([mins])).iloc[0]
+        pool = per90(peer_pool[m], peer_pool["Minutes played"])
+        p = percentile_rank(v, pool)
+        per90_vals.append(v)
+        pct_vals.append(p)
 
-        if is_pct:
-            val = to_num(pd.Series([r.get(col, np.nan)])).iloc[0]
-            pool = peer_pool[col] if col in peer_pool.columns else pd.Series(dtype=float)
-            pct = percentile_rank(val, pool)
-            per90_vals.append(val)
-            pct_vals.append(pct)
-        else:
-            # per90 computed from totals + minutes (even if already per90 in export, totals work reliably)
-            val = per90(pd.Series([r.get(col, np.nan)]), pd.Series([mins])).iloc[0]
-            pool = per90(peer_pool[col], peer_pool[minutes_col]) if col in peer_pool.columns else pd.Series(dtype=float)
-            pct = percentile_rank(val, pool)
-            per90_vals.append(val)
-            pct_vals.append(pct)
+    per90_tbl[col_name] = per90_vals
+    pct_tbl[col_name] = pct_vals
 
-    per90_tbl[pname] = per90_vals
-    pct_tbl[pname] = pct_vals
+per90_tbl = per90_tbl.round(3)
+pct_tbl = pct_tbl.round(1)
 
-# Formatting
-per90_tbl = per90_tbl.apply(pd.to_numeric, errors="ignore").round(3)
-pct_tbl = pct_tbl.apply(pd.to_numeric, errors="ignore").round(1)
-
-# ----------------------------
-# Display tables
-# ----------------------------
 st.subheader("Per-90 values")
-st.caption("Totals are normalized by minutes. Percentage metrics are shown as raw values.")
 st.dataframe(per90_tbl, use_container_width=True)
 
-st.subheader("Percentiles vs peer pool")
-st.caption("0–100 scale. Higher is better for these metrics (we can invert selected metrics later if needed).")
-st.dataframe(pct_tbl, use_container_width=True)
-
-# Download
-csv_out = pct_tbl.reset_index().rename(columns={"index": "Metric"}).to_csv(index=False).encode("utf-8")
-st.download_button(
-    "Download percentiles as CSV",
-    data=csv_out,
-    file_name="compare_percentiles.csv",
-    mime="text/csv",
-)
+st.subheader("Percentiles (0–100)")
+# Color styling (heatmap-style) driven by selected color scale
+styled = pct_tbl.style.background_gradient(axis=None, cmap=color_scale, vmin=0, vmax=100)
+st.dataframe(styled, use_container_width=True)
 
 st.divider()
 
@@ -338,20 +295,18 @@ st.divider()
 # ----------------------------
 st.subheader("Radar (percentiles)")
 
-radar_metrics = pct_tbl.index.tolist()
-if len(radar_metrics) < 3:
-    st.info("Not enough metrics for radar (need at least 3). Increase Max metrics or choose another template.")
+metrics = pct_tbl.index.tolist()
+if len(metrics) < 3:
+    st.info("Select at least 3 metrics to display a radar chart.")
     st.stop()
 
 fig = go.Figure()
-
 for col in pct_tbl.columns:
-    values = pct_tbl[col].tolist()
-    # close the loop
+    vals = pct_tbl[col].tolist()
     fig.add_trace(
         go.Scatterpolar(
-            r=values + [values[0]],
-            theta=radar_metrics + [radar_metrics[0]],
+            r=vals + [vals[0]],
+            theta=metrics + [metrics[0]],
             fill="none",
             name=col,
         )
