@@ -5,9 +5,11 @@ from src.data import load_csv
 from src.filters import apply_filters
 from src.ui import sidebar_controls, player_header
 
-st.title("Players")
+if "data" not in st.session_state:
+    st.warning("No data loaded yet. Please upload a CSV on the Home page.")
+    st.stop()
 
-CSV_PATH = "data/Wyscout_League_Export.csv"
+df = st.session_state["data"]
 
 # Load data
 try:
