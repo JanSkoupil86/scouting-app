@@ -5,15 +5,15 @@ def sidebar_controls(df: pd.DataFrame):
     with st.sidebar:
         st.header("Player Filters")
 
-        # 1) Season FIRST (parsed into df["Season"] in app.py)
+        # 1) Season FIRST
         seasons = ["All"]
         if "Season" in df.columns:
             s = df["Season"].astype(str)
-            s = s[(s != "") & (s.lower() != "nan")]
+            s = s[(s != "") & (s.str.lower() != "nan")]
             seasons += sorted(s.dropna().unique().tolist())
         season = st.selectbox("Season", seasons)
 
-        # 2) League/Competition SECOND (prefer df["Competition"], fallback df["League"])
+        # 2) League/Competition SECOND
         leagues = ["All"]
         if "Competition" in df.columns:
             leagues += sorted(df["Competition"].dropna().astype(str).unique().tolist())
@@ -42,7 +42,6 @@ def sidebar_controls(df: pd.DataFrame):
         # 6) Name search
         name_query = st.text_input("Search player name", "")
 
-    # IMPORTANT: return exactly 6 values
     return season, competition, minutes_min, team, position, name_query
 
 
