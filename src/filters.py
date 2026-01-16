@@ -3,6 +3,7 @@ import pandas as pd
 def apply_filters(
     df: pd.DataFrame,
     season: str = "All",
+    competition: str = "All",
     minutes_min: int = 0,
     team: str = "All",
     position: str = "All",
@@ -13,6 +14,13 @@ def apply_filters(
     # Season
     if season != "All" and "Season" in out.columns:
         out = out[out["Season"].astype(str) == str(season)]
+
+    # Competition (prefer parsed Competition; fallback to League)
+    if competition != "All":
+        if "Competition" in out.columns:
+            out = out[out["Competition"].astype(str) == str(competition)]
+        elif "League" in out.columns:
+            out = out[out["League"].astype(str) == str(competition)]
 
     # Minutes
     if "Minutes played" in out.columns:
