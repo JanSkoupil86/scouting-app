@@ -316,3 +316,9 @@ if len(radar_metrics) >= 3:
     fig.update_layout(
         polar=dict(radialaxis=dict(visible=True, range=[0, 100])),
         showlegend=True,
+        height=520,
+        margin=dict(l=20, r=20, t=30, b=20),
+    )
+    st.plotly_chart(fig, use_container_width=True)
+else:
+    st.info("Select at least 3 metrics to show a radar chart.")
