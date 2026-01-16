@@ -27,14 +27,15 @@ def apply_filters(
         mins = pd.to_numeric(out["Minutes played"], errors="coerce").fillna(0)
         out = out[mins >= minutes_min]
 
-    # Team (use Team within selected timeframe if present)
+    # Team (within timeframe preferred)
     team_col = "Team within selected timeframe" if "Team within selected timeframe" in out.columns else "Team"
     if team != "All" and team_col in out.columns:
         out = out[out[team_col].astype(str) == str(team)]
 
-    # Position
-    if position != "All" and "Position" in out.columns:
-        out = out[out["Position"].astype(str) == str(position)]
+    # Position (Main Position preferred)
+    pos_col = "Main Position" if "Main Position" in out.columns else "Position"
+    if position != "All" and pos_col in out.columns:
+        out = out[out[pos_col].astype(str) == str(position)]
 
     # Name query
     if name_query.strip() and "Player" in out.columns:
