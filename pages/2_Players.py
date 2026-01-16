@@ -6,10 +6,11 @@ from src.filters import apply_filters
 from src.ui import sidebar_controls, player_header
 
 if "data" not in st.session_state:
-    st.warning("No data loaded yet. Please upload a CSV on the Home page.")
+    st.warning("No data loaded yet. Go to the main page and upload a CSV.")
     st.stop()
 
 df = st.session_state["data"]
+
 
 # Load data
 try:
