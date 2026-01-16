@@ -32,11 +32,12 @@ for col in ["Player", "Team", "Position"]:
 # ----------------------------
 # Sidebar filters
 # ----------------------------
-season, minutes_min, team, position, name_query = sidebar_controls(df)
+season, competition, minutes_min, team, position, name_query = sidebar_controls(df)
 
 df_f = apply_filters(
     df,
     season=season,
+    competition=competition,
     minutes_min=minutes_min,
     team=team,
     position=position,
