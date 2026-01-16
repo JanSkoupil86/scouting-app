@@ -92,23 +92,32 @@ with c2:
     season = st.selectbox("Season", season_options, index=0)
 
 with c3:
-    color_scale = st.selectbox(
+    # Pandas Styler background_gradient uses Matplotlib colormaps.
+    # Only include names that Matplotlib recognizes reliably.
+    MATPLOTLIB_CMAPS = {
+        "Viridis": "viridis",
+        "Cividis": "cividis",
+        "Plasma": "plasma",
+        "Magma": "magma",
+        "Inferno": "inferno",
+        "Blues": "Blues",
+        "Greens": "Greens",
+        "Reds": "Reds",
+        "Purples": "Purples",
+        "Oranges": "Oranges",
+        "RdBu": "RdBu",
+        "RdYlGn": "RdYlGn",
+        "Spectral": "Spectral",
+        "Coolwarm": "coolwarm",
+    }
+
+    color_scale_label = st.selectbox(
         "Color scale",
-        options=[
-            "Viridis",
-            "Cividis",
-            "Plasma",
-            "Magma",
-            "Inferno",
-            "Turbo",
-            "Blues",
-            "Greens",
-            "Reds",
-            "RdBu",
-            "RdYlGn",
-        ],
+        options=list(MATPLOTLIB_CMAPS.keys()),
         index=0,
+        help="Used for percentile heatmap. (Matplotlib colormaps only.)",
     )
+    color_scale = MATPLOTLIB_CMAPS[color_scale_label]
 
 # Apply global season filter (affects all pickers + all peer pools)
 df_base = df.copy()
