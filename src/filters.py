@@ -15,7 +15,7 @@ def apply_filters(
     if season != "All" and "Season" in out.columns:
         out = out[out["Season"].astype(str) == str(season)]
 
-    # Competition (prefer parsed Competition; fallback to League)
+    # League/Competition (prefer parsed Competition; fallback to League)
     if competition != "All":
         if "Competition" in out.columns:
             out = out[out["Competition"].astype(str) == str(competition)]
@@ -27,13 +27,14 @@ def apply_filters(
         mins = pd.to_numeric(out["Minutes played"], errors="coerce").fillna(0)
         out = out[mins >= minutes_min]
 
-    # Team
-    if team != "All" and "Team" in out.columns:
-        out = out[out["Team"] == team]
+    # Team (use Team within selected timeframe if present)
+    team_col = "Team within selected timeframe" if "Team within selected timeframe" in out.columns else "Team"
+    if team != "All" and team_col in out.columns:
+        out = out[out[team_col].astype(str) == str(team)]
 
     # Position
     if position != "All" and "Position" in out.columns:
-        out = out[out["Position"] == position]
+        out = out[out["Position"].astype(str) == str(position)]
 
     # Name query
     if name_query.strip() and "Player" in out.columns:
