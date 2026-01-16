@@ -32,10 +32,16 @@ for col in ["Player", "Team", "Position"]:
 # ----------------------------
 # Sidebar filters
 # ----------------------------
-minutes_min, team, position, name_query = sidebar_controls(df)
+season, minutes_min, team, position, name_query = sidebar_controls(df)
 
-# Apply filters for the scouting list
-df_f = apply_filters(df, minutes_min=minutes_min, team=team, position=position, name_query=name_query)
+df_f = apply_filters(
+    df,
+    season=season,
+    minutes_min=minutes_min,
+    team=team,
+    position=position,
+    name_query=name_query,
+)
 
 st.subheader("Scouting list")
 st.caption("Filter, sort, and select a player to open their individual profile.")
