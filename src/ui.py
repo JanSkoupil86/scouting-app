@@ -5,25 +5,34 @@ def sidebar_controls(df: pd.DataFrame):
     with st.sidebar:
         st.header("Player Filters")
 
+        # 1) Season FIRST
+        seasons = ["All"]
+        if "Season" in df.columns:
+            seasons += sorted(df["Season"].dropna().astype(str).unique().tolist())
+        season = st.selectbox("Season", seasons)
+
+        # 2) Minutes
         max_minutes = 0
         if "Minutes played" in df.columns:
-            max_minutes = int(df["Minutes played"].fillna(0).max())
-
+            max_minutes = int(pd.to_numeric(df["Minutes played"], errors="coerce").fillna(0).max())
         minutes_min = st.slider("Minimum minutes", 0, max_minutes, 600, 30)
 
+        # 3) Team
         teams = ["All"]
         if "Team" in df.columns:
             teams += sorted(df["Team"].dropna().unique().tolist())
         team = st.selectbox("Team", teams)
 
+        # 4) Position
         positions = ["All"]
         if "Position" in df.columns:
             positions += sorted(df["Position"].dropna().unique().tolist())
         position = st.selectbox("Position", positions)
 
+        # 5) Name search
         name_query = st.text_input("Search player name", "")
 
-    return minutes_min, team, position, name_query
+    return season, minutes_min, team, position, name_query
 
 
 def player_header(player_row: pd.Series):
