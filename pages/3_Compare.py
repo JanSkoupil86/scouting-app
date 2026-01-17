@@ -1,6 +1,13 @@
 # pages/3_Compare.py
 # Compare page: cross-season player selection + profile-based metric presets + winner-highlight tables
 # + filled radar + PNG/PDF export (one-page report)
+#
+# IMPORTANT:
+# - For PNG/PDF export of Plotly radar, add `kaleido` to requirements.txt.
+# - Uses:
+#   - League/Competition column: "Competition" if present else "League"
+#   - Team column: "Team within selected timeframe" (preferred) else "Team"
+#   - Position column: "Main Position" (preferred) else "Position"
 
 import io
 import re
@@ -45,14 +52,14 @@ if missing:
 # ----------------------------
 league_col = "Competition" if "Competition" in df.columns else ("League" if "League" in df.columns else None)
 
-# IMPORTANT: you asked to use "Team within selected timeframe" (not "Team")
+# Use Team within selected timeframe if available
 team_col = (
     "Team within selected timeframe"
     if "Team within selected timeframe" in df.columns
     else ("Team" if "Team" in df.columns else None)
 )
 
-# IMPORTANT: you asked to use "Main Position"
+# Use Main Position if available
 pos_col = "Main Position" if "Main Position" in df.columns else ("Position" if "Position" in df.columns else None)
 
 if league_col is None or team_col is None or pos_col is None:
@@ -132,7 +139,6 @@ def percentile_rank(value, population: pd.Series) -> float:
     pop = to_num(population).dropna()
     if pop.empty or pd.isna(value):
         return np.nan
-    # percent strictly below
     return round((pop < float(value)).mean() * 100.0, 2)
 
 
@@ -260,7 +266,7 @@ with mcol3:
 with mcol4:
     apply_profile = st.button("Apply", use_container_width=True, disabled=(selected_profile == "Manual (no profile)"))
 
-# Track the *applied* profile (not just selected in dropdown)
+# Track the *applied* profile (not just selected)
 if "compare_active_profile" not in st.session_state:
     st.session_state["compare_active_profile"] = "Manual (no profile)"
 
@@ -287,7 +293,6 @@ if apply_profile and selected_profile != "Manual (no profile)":
 
 active_profile = st.session_state.get("compare_active_profile", "Manual (no profile)")
 
-# Show missing metrics for transparency
 if selected_profile != "Manual (no profile)":
     missing_in_data = [m for m in PROFILES[selected_profile] if m not in available_metrics]
     if missing_in_data:
@@ -311,7 +316,7 @@ st.divider()
 # Side-by-side selectors (Season first)
 # ----------------------------
 st.subheader("Pick players (side by side)")
-st.caption("Each slot: Season → League → Team → Main Position → Player (prevents duplicate player rows across seasons).")
+st.caption("Each slot: Season → League → Team → Main Position → Player.")
 
 slots_per_row = 3
 rows = (int(n_players) + slots_per_row - 1) // slots_per_row
@@ -457,7 +462,10 @@ for _, r in sel_df.iterrows():
         pool = global_pool
     else:
         pool = df2.copy()
-        pool = pool[(pool["Season"].astype(str) == player_season) & (pool[league_col].astype(str) == player_league)].copy()
+        pool = pool[
+            (pool["Season"].astype(str) == player_season)
+            & (pool[league_col].astype(str) == player_league)
+        ].copy()
         pool["Position group"] = pool[pos_col].apply(map_position_group)
         if peer_mode == "Within each player's Season + League + Position group":
             pool = pool[pool["Position group"] == player_group]
@@ -497,7 +505,6 @@ def style_values_winners(values: pd.DataFrame):
             else:
                 out.append("")
         return out
-
     return values.style.format("{:.2f}").apply(_row_style, axis=1)
 
 
@@ -516,7 +523,6 @@ def style_pct_winners(pcts: pd.DataFrame):
             else:
                 out.append("")
         return out
-
     return pcts.style.format("{:.2f}").apply(_row_style, axis=1)
 
 
@@ -530,7 +536,7 @@ st.divider()
 
 
 # ----------------------------
-# Radar chart (percentiles) — filled + profile name in title if applied
+# Radar chart (percentiles) — filled + profile name when applied
 # ----------------------------
 radar_title = "Radar (percentiles)"
 if active_profile != "Manual (no profile)":
@@ -569,14 +575,15 @@ fig.update_layout(
     margin=dict(l=20, r=20, t=30, b=20),
 )
 
-# Export radar as PNG bytes (requires kaleido in requirements.txt: `kaleido`)
+# Export radar as PNG bytes (requires kaleido)
 radar_png = None
+radar_export_error = None
 try:
     import plotly.io as pio
-
     radar_png = pio.to_image(fig, format="png", width=900, height=900)
-except Exception:
+except Exception as e:
     radar_png = None
+    radar_export_error = str(e)
 
 st.plotly_chart(fig, use_container_width=True)
 
@@ -590,6 +597,8 @@ st.subheader("Export")
 
 if radar_png is None:
     st.info("Radar PNG export is unavailable. Add `kaleido` to requirements.txt to enable PNG/PDF export.")
+    with st.expander("Export debug details"):
+        st.write(radar_export_error or "Unknown error.")
 else:
     st.download_button(
         "Download radar (PNG)",
@@ -608,10 +617,10 @@ def build_one_page_pdf(
     radar_png_bytes: bytes,
 ) -> bytes:
     """
-    Creates a single-page PDF (landscape A4) with:
+    Single-page PDF (landscape A4):
       - title/subtitle
       - player headers
-      - percentiles table (truncated if too long)
+      - percentiles table (truncated for one-page)
       - radar image
     """
     from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, Image
@@ -634,19 +643,17 @@ def build_one_page_pdf(
     story.append(Paragraph(f"<b>{title}</b>", styles["Title"]))
     if subtitle:
         story.append(Paragraph(subtitle, styles["Normal"]))
-    story.append(Spacer(1, 10))
+    story.append(Spacer(1, 8))
 
-    # Player line
     story.append(Paragraph("<b>Players:</b> " + " | ".join(player_headers), styles["Normal"]))
-    story.append(Spacer(1, 10))
+    story.append(Spacer(1, 8))
 
-    # Table: limit rows to keep one page readable
+    # Table: cap rows to keep one page
     max_rows = 20
     tbl_df = percentile_table.copy()
     if len(tbl_df) > max_rows:
         tbl_df = tbl_df.iloc[:max_rows, :]
 
-    # Build table data (Metric + players)
     table_data = [[tbl_df.index.name or "Metric"] + list(tbl_df.columns)]
     for idx, row in tbl_df.iterrows():
         table_data.append([str(idx)] + [f"{safe_float(v):.2f}" if pd.notna(v) else "" for v in row.tolist()])
@@ -673,7 +680,6 @@ def build_one_page_pdf(
 
     story.append(Spacer(1, 10))
 
-    # Radar image
     img = Image(io.BytesIO(radar_png_bytes))
     img.drawHeight = 300
     img.drawWidth = 300
