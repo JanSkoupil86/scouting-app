@@ -52,8 +52,7 @@ def percentile_rank(value, population: pd.Series):
     pop = to_num(population).dropna()
     if pop.empty or pd.isna(value):
         return np.nan
-    # strict percentile (stable with ties)
-    return round((pop < float(value)).mean() * 100.0, 1)
+    return round((pop < float(value)).mean() * 100.0, 2)  # compute to 2dp
 
 
 def map_position_group(position_str: str) -> str:
@@ -93,7 +92,6 @@ with c2:
 
 with c3:
     # Pandas Styler background_gradient uses Matplotlib colormaps.
-    # Only include names that Matplotlib recognizes reliably.
     MATPLOTLIB_CMAPS = {
         "Viridis": "viridis",
         "Cividis": "cividis",
@@ -134,47 +132,28 @@ st.divider()
 # Metrics catalogue (your list)
 # ----------------------------
 METRICS_CATALOGUE = [
-    "Goals", "xG", "Assists", "xA",
-    "Duels per 90", "Duels won, %", "Successful defensive actions per 90",
+    "Goals", "xG", "Assists", "xA", "Duels per 90", "Duels won, %", "Successful defensive actions per 90",
     "Defensive duels per 90", "Defensive duels won, %", "Aerial duels per 90", "Aerial duels won, %",
-    "Sliding tackles per 90", "PAdj Sliding tackles", "Shots blocked per 90",
-    "Interceptions per 90", "PAdj Interceptions",
-    "Fouls per 90", "Yellow cards", "Yellow cards per 90", "Red cards", "Red cards per 90",
-    "Successful attacking actions per 90",
-    "Goals per 90", "Non-penalty goals", "Non-penalty goals per 90",
-    "xG per 90", "Head goals", "Head goals per 90",
-    "Shots", "Shots per 90", "Shots on target, %", "Goal conversion, %",
-    "Assists per 90",
-    "Crosses per 90", "Accurate crosses, %",
-    "Crosses from left flank per 90", "Accurate crosses from left flank, %",
-    "Crosses from right flank per 90", "Accurate crosses from right flank, %",
-    "Crosses to goalie box per 90",
-    "Dribbles per 90", "Successful dribbles, %",
-    "Offensive duels per 90", "Offensive duels won, %",
-    "Touches in box per 90", "Progressive runs per 90", "Accelerations per 90",
-    "Received passes per 90", "Received long passes per 90",
-    "Fouls suffered per 90",
-    "Passes per 90", "Accurate passes, %",
-    "Forward passes per 90", "Accurate forward passes, %",
-    "Back passes per 90", "Accurate back passes, %",
-    "Lateral passes per 90", "Accurate lateral passes, %",
-    "Short / medium passes per 90", "Accurate short / medium passes, %",
-    "Long passes per 90", "Accurate long passes, %",
-    "Average pass length, m", "Average long pass length, m",
-    "xA per 90", "Shot assists per 90", "Second assists per 90", "Third assists per 90",
-    "Smart passes per 90", "Accurate smart passes, %",
-    "Key passes per 90",
-    "Passes to final third per 90", "Accurate passes to final third, %",
-    "Passes to penalty area per 90", "Accurate passes to penalty area, %",
-    "Through passes per 90", "Accurate through passes, %",
-    "Deep completions per 90", "Deep completed crosses per 90",
-    "Progressive passes per 90", "Accurate progressive passes, %",
-    "Conceded goals", "Conceded goals per 90",
-    "Shots against", "Shots against per 90",
-    "Clean sheets", "Save rate, %", "xG against", "xG against per 90",
-    "Prevented goals", "Prevented goals per 90",
-    "Back passes received as GK per 90", "Exits per 90", "Aerial duels per 90.1",
-    "Free kicks per 90", "Direct free kicks per 90", "Direct free kicks on target, %",
+    "Sliding tackles per 90", "PAdj Sliding tackles", "Shots blocked per 90", "Interceptions per 90",
+    "PAdj Interceptions", "Fouls per 90", "Yellow cards", "Yellow cards per 90", "Red cards", "Red cards per 90",
+    "Successful attacking actions per 90", "Goals per 90", "Non-penalty goals", "Non-penalty goals per 90",
+    "xG per 90", "Head goals", "Head goals per 90", "Shots", "Shots per 90", "Shots on target, %", "Goal conversion, %",
+    "Assists per 90", "Crosses per 90", "Accurate crosses, %", "Crosses from left flank per 90",
+    "Accurate crosses from left flank, %", "Crosses from right flank per 90", "Accurate crosses from right flank, %",
+    "Crosses to goalie box per 90", "Dribbles per 90", "Successful dribbles, %", "Offensive duels per 90",
+    "Offensive duels won, %", "Touches in box per 90", "Progressive runs per 90", "Accelerations per 90",
+    "Received passes per 90", "Received long passes per 90", "Fouls suffered per 90", "Passes per 90",
+    "Accurate passes, %", "Forward passes per 90", "Accurate forward passes, %", "Back passes per 90",
+    "Accurate back passes, %", "Lateral passes per 90", "Accurate lateral passes, %", "Short / medium passes per 90",
+    "Accurate short / medium passes, %", "Long passes per 90", "Accurate long passes, %", "Average pass length, m",
+    "Average long pass length, m", "xA per 90", "Shot assists per 90", "Second assists per 90", "Third assists per 90",
+    "Smart passes per 90", "Accurate smart passes, %", "Key passes per 90", "Passes to final third per 90",
+    "Accurate passes to final third, %", "Passes to penalty area per 90", "Accurate passes to penalty area, %",
+    "Through passes per 90", "Accurate through passes, %", "Deep completions per 90", "Deep completed crosses per 90",
+    "Progressive passes per 90", "Accurate progressive passes, %", "Conceded goals", "Conceded goals per 90",
+    "Shots against", "Shots against per 90", "Clean sheets", "Save rate, %", "xG against", "xG against per 90",
+    "Prevented goals", "Prevented goals per 90", "Back passes received as GK per 90", "Exits per 90",
+    "Aerial duels per 90.1", "Free kicks per 90", "Direct free kicks per 90", "Direct free kicks on target, %",
     "Corners per 90", "Penalties taken", "Penalty conversion, %",
 ]
 
@@ -296,7 +275,6 @@ if len(sel_df) != int(n_players):
     st.info("Please complete selection in all player slots to continue.")
     st.stop()
 
-# Add position group (for peer pool options)
 sel_df = sel_df.copy()
 sel_df["Position group"] = sel_df[pos_col].apply(map_position_group)
 
@@ -334,7 +312,7 @@ for i, col in enumerate(pcols):
 st.divider()
 
 # ----------------------------
-# Percentile peer pool mode
+# Values + percentiles
 # ----------------------------
 st.subheader("Values and percentiles")
 
@@ -349,7 +327,6 @@ peer_mode = st.radio(
     horizontal=False,
 )
 
-# Precompute global pool (season filtered)
 global_pool = df_base.copy()
 global_pool["Position group"] = global_pool[pos_col].apply(map_position_group)
 
@@ -375,9 +352,8 @@ for i, r in sel_df.iterrows():
         v = to_num(pd.Series([r.get(m, np.nan)])).iloc[0]
         pop = pool[m] if m in pool.columns else pd.Series(dtype=float)
         pct = percentile_rank(v, pop)
-
         if m in LOWER_BETTER and not pd.isna(pct):
-            pct = round(100.0 - pct, 1)
+            pct = round(100.0 - pct, 2)
 
         vals.append(v)
         pcts.append(pct)
@@ -385,17 +361,20 @@ for i, r in sel_df.iterrows():
     values_tbl[player_name] = vals
     pct_tbl[player_name] = pcts
 
-values_tbl = values_tbl.round(3)
-pct_tbl = pct_tbl.round(1)
+values_tbl = values_tbl.round(2)
+pct_tbl = pct_tbl.round(2)
 
 st.write("**Values (raw columns)**")
-st.dataframe(values_tbl, use_container_width=True)
+st.dataframe(values_tbl.style.format("{:.2f}"), use_container_width=True)
 
 st.write("**Percentiles (0–100)**")
-styled = pct_tbl.style.background_gradient(axis=None, cmap=color_scale, vmin=0, vmax=100)
+styled = (
+    pct_tbl.style
+    .format("{:.2f}")  # display rounded to 2 decimals
+    .background_gradient(axis=None, cmap=color_scale, vmin=0, vmax=100)
+)
 st.dataframe(styled, use_container_width=True)
 
-# Download
 csv_out = pct_tbl.reset_index().rename(columns={"index": "Metric"}).to_csv(index=False).encode("utf-8")
 st.download_button(
     "Download percentiles as CSV",
