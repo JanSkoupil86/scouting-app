@@ -4,6 +4,8 @@ import pandas as pd
 import streamlit as st
 import plotly.graph_objects as go
 
+from src.profiles import PROFILES
+
 st.set_page_config(page_title="Compare", layout="wide")
 st.title("Compare")
 
@@ -38,7 +40,7 @@ if league_col is None or team_col is None or pos_col is None:
     st.error("Missing required columns. Need League/Competition, Team, and Main Position/Position columns.")
     st.stop()
 
-# Clean strings
+# Standardize string columns
 for col in ["Player", league_col, team_col, pos_col]:
     df[col] = df[col].astype(str).str.strip()
 
@@ -86,30 +88,26 @@ def _safe_float(x):
 
 def extract_season_from_text(text: str) -> str | None:
     """
-    Extract season tokens from a league string.
+    Extract season tokens from league text.
     Handles:
-      - 2024-25, 2024/25
-      - 24/25
-      - standalone years 2024, 2025
-    Returns a normalized season label: "24/25" or "25/26" or "2024" etc.
+      - 2024-25 or 2024/25 -> 24/25
+      - 24/25 -> 24/25
+      - standalone year 2024 -> 2024 (spring-fall leagues)
     """
     if text is None:
         return None
     t = str(text)
 
-    # 2024-25 or 2024/25
     m = re.search(r"\b(20\d{2})\s*[-/]\s*(\d{2})\b", t)
     if m:
         y1 = int(m.group(1))
         y2 = int(m.group(2))
         return f"{str(y1)[2:]}/{y2:02d}"
 
-    # 24/25
     m = re.search(r"\b(\d{2})\s*/\s*(\d{2})\b", t)
     if m:
         return f"{int(m.group(1)):02d}/{int(m.group(2)):02d}"
 
-    # standalone year 2024 or 2025 (spring-fall leagues)
     m = re.search(r"\b(20\d{2})\b", t)
     if m:
         return m.group(1)
@@ -118,21 +116,18 @@ def extract_season_from_text(text: str) -> str | None:
 
 
 # ----------------------------
-# Ensure Season column exists
+# Ensure Season exists
 # ----------------------------
 df2 = df.copy()
 if "Season" not in df2.columns:
-    # derive Season from league text
     df2["Season"] = df2[league_col].apply(extract_season_from_text)
 
-# Clean season
 df2["Season"] = df2["Season"].astype(str).str.strip()
 df2.loc[df2["Season"].str.lower().isin(["nan", "none", ""]), "Season"] = np.nan
 
 if df2["Season"].dropna().empty:
     st.error(
-        "Could not derive a Season column. Your League/Competition values must contain tokens like "
-        "'2024-25', '24/25', or '2024'."
+        "Could not derive a Season column. League/Competition must contain tokens like '2024-25', '24/25', or '2024'."
     )
     st.stop()
 
@@ -140,6 +135,7 @@ if df2["Season"].dropna().empty:
 # Top controls
 # ----------------------------
 c1, c2, c3 = st.columns([1, 1, 1])
+
 with c1:
     n_players = st.number_input("Number of players to compare", 2, 6, 2, 1)
 
@@ -147,7 +143,7 @@ with c2:
     cross_season = st.toggle(
         "Compare across seasons (per slot)",
         value=True,
-        help="ON: each player slot chooses its own season. OFF: one global season filter for all slots."
+        help="ON: each player slot chooses its own season. OFF: one global season filter for all slots.",
     )
 
 with c3:
@@ -158,7 +154,6 @@ if not cross_season:
     seasons = unique_sorted(df2["Season"])
     global_season = st.selectbox("Season (global)", ["All"] + seasons, index=0)
 
-# Base data for metrics/peer pools etc.
 df_base_global = df2.copy()
 if (not cross_season) and global_season and global_season != "All":
     df_base_global = df_base_global[df_base_global["Season"].astype(str) == str(global_season)]
@@ -170,7 +165,7 @@ if df_base_global.empty:
 st.divider()
 
 # ----------------------------
-# Metrics
+# Metrics catalogue (same list used to validate available metrics)
 # ----------------------------
 METRICS_CATALOGUE = [
     "Goals", "xG", "Assists", "xA", "Duels per 90", "Duels won, %", "Successful defensive actions per 90",
@@ -208,27 +203,91 @@ LOWER_BETTER = {
 }
 
 available_metrics = [m for m in METRICS_CATALOGUE if m in df_base_global.columns]
+
+# ----------------------------
+# Metrics selection: Manual + Profiles
+# ----------------------------
 st.subheader("Metrics")
 
 if not available_metrics:
     st.warning("None of the requested metrics were found in your dataset columns.")
     st.stop()
 
-default_metrics = [m for m in ["Goals per 90", "xG per 90", "Assists per 90", "xA per 90", "Duels won, %"] if m in available_metrics]
-if not default_metrics:
-    default_metrics = available_metrics[:10]
+profile_names = ["Manual (no profile)"] + sorted(PROFILES.keys())
 
-metrics = st.multiselect("Select metrics for comparison", options=available_metrics, default=default_metrics)
+mcol1, mcol2, mcol3, mcol4 = st.columns([2, 1, 1, 1])
+
+with mcol1:
+    selected_profile = st.selectbox(
+        "Profiles (optional)",
+        options=profile_names,
+        index=0,
+        help="Pick a preset profile to populate metrics. You can still edit manually after applying.",
+    )
+
+with mcol2:
+    apply_mode = st.radio(
+        "Apply mode",
+        options=["Replace", "Add"],
+        index=0,
+        horizontal=True,
+        help="Replace overwrites current metrics. Add appends profile metrics.",
+    )
+
+with mcol3:
+    clear_metrics = st.button("Clear", use_container_width=True)
+
+with mcol4:
+    apply_profile = st.button(
+        "Apply",
+        use_container_width=True,
+        disabled=(selected_profile == "Manual (no profile)"),
+    )
+
+# default compare metrics
+if "compare_metrics" not in st.session_state:
+    defaults = [m for m in ["Goals per 90", "xG per 90", "Assists per 90", "xA per 90", "Duels won, %"] if m in available_metrics]
+    if not defaults:
+        defaults = available_metrics[:10]
+    st.session_state["compare_metrics"] = defaults
+
+if clear_metrics:
+    st.session_state["compare_metrics"] = []
+
+if apply_profile and selected_profile != "Manual (no profile)":
+    prof_metrics = [m for m in PROFILES[selected_profile] if m in available_metrics]
+    if not prof_metrics:
+        st.warning("This profile has no metrics available in the current dataset.")
+    else:
+        if apply_mode == "Replace":
+            st.session_state["compare_metrics"] = prof_metrics
+        else:
+            merged = list(dict.fromkeys(st.session_state["compare_metrics"] + prof_metrics))
+            st.session_state["compare_metrics"] = merged
+
+if selected_profile != "Manual (no profile)":
+    missing_in_data = [m for m in PROFILES[selected_profile] if m not in available_metrics]
+    if missing_in_data:
+        with st.expander("Profile metrics not found in this dataset"):
+            st.write(missing_in_data)
+
+metrics = st.multiselect(
+    "Select metrics for comparison",
+    options=available_metrics,
+    default=st.session_state["compare_metrics"],
+)
+st.session_state["compare_metrics"] = metrics
+
 if not metrics:
     st.stop()
 
 st.divider()
 
 # ----------------------------
-# Side-by-side selectors (SEASON FIRST)
+# Side-by-side selectors (Season first)
 # ----------------------------
 st.subheader("Pick players (side by side)")
-st.caption("Each slot is filtered: Season → League → Team → Main Position → Player. This prevents collisions across seasons.")
+st.caption("Each slot: Season → League → Team → Main Position → Player. This prevents duplicate player rows across seasons.")
 
 slots_per_row = 3
 rows = (int(n_players) + slots_per_row - 1) // slots_per_row
@@ -255,9 +314,14 @@ for r in range(rows):
             if cross_season:
                 season_val = st.selectbox(f"Season {slot_idx}", options=seasons, key=f"season_{slot_idx}")
             else:
-                # show fixed season
                 season_val = global_season if global_season != "All" else seasons[0]
-                st.selectbox(f"Season {slot_idx}", options=[season_val], index=0, key=f"season_{slot_idx}_fixed", disabled=True)
+                st.selectbox(
+                    f"Season {slot_idx}",
+                    options=[season_val],
+                    index=0,
+                    key=f"season_{slot_idx}_fixed",
+                    disabled=True,
+                )
 
             df_s = base_for_slot[base_for_slot["Season"].astype(str) == str(season_val)]
             leagues = unique_sorted(df_s[league_col])
@@ -291,12 +355,11 @@ for r in range(rows):
 
             player_val = st.selectbox(f"Player {slot_idx}", options=players, key=f"player_{slot_idx}")
 
-            # Resolve row EXACTLY by Player + Season + League + Team + Position, fallback to max minutes only if duplicates remain
+            # resolve (if still duplicates, pick max minutes)
             cand = df_p[df_p["Player"].astype(str) == str(player_val)].copy()
             cand["__mins"] = to_num(cand["Minutes played"]).fillna(0)
             cand = cand.sort_values("__mins", ascending=False)
             chosen = cand.iloc[0].drop(labels=["__mins"])
-
             selections.append(chosen)
 
 sel_df = pd.DataFrame(selections).reset_index(drop=True)
@@ -310,7 +373,7 @@ sel_df["Position group"] = sel_df[pos_col].apply(map_position_group)
 st.divider()
 
 # ----------------------------
-# Profiles
+# Profiles block
 # ----------------------------
 st.subheader("Profiles")
 
