@@ -41,6 +41,7 @@ if league_col is None or team_col is None or pos_col is None:
 for col in ["Player", league_col, team_col, pos_col]:
     df[col] = df[col].astype(str).str.strip()
 
+
 # ----------------------------
 # Helpers
 # ----------------------------
@@ -52,7 +53,7 @@ def percentile_rank(value, population: pd.Series):
     pop = to_num(population).dropna()
     if pop.empty or pd.isna(value):
         return np.nan
-    return round((pop < float(value)).mean() * 100.0, 2)  # compute to 2dp
+    return round((pop < float(value)).mean() * 100.0, 2)
 
 
 def map_position_group(position_str: str) -> str:
@@ -76,6 +77,13 @@ def unique_sorted(series: pd.Series) -> list[str]:
     return sorted(s.unique().tolist())
 
 
+def _safe_float(x):
+    try:
+        return float(x)
+    except Exception:
+        return np.nan
+
+
 # ----------------------------
 # Top controls
 # ----------------------------
@@ -91,33 +99,10 @@ with c2:
     season = st.selectbox("Season", season_options, index=0)
 
 with c3:
-    # Pandas Styler background_gradient uses Matplotlib colormaps.
-    MATPLOTLIB_CMAPS = {
-        "Viridis": "viridis",
-        "Cividis": "cividis",
-        "Plasma": "plasma",
-        "Magma": "magma",
-        "Inferno": "inferno",
-        "Blues": "Blues",
-        "Greens": "Greens",
-        "Reds": "Reds",
-        "Purples": "Purples",
-        "Oranges": "Oranges",
-        "RdBu": "RdBu",
-        "RdYlGn": "RdYlGn",
-        "Spectral": "Spectral",
-        "Coolwarm": "coolwarm",
-    }
+    # Player fill opacity for radar
+    fill_opacity = st.slider("Radar fill opacity", 0.05, 0.60, 0.25, 0.05)
 
-    color_scale_label = st.selectbox(
-        "Color scale",
-        options=list(MATPLOTLIB_CMAPS.keys()),
-        index=0,
-        help="Used for percentile heatmap. (Matplotlib colormaps only.)",
-    )
-    color_scale = MATPLOTLIB_CMAPS[color_scale_label]
-
-# Apply global season filter (affects all pickers + all peer pools)
+# Apply global season filter
 df_base = df.copy()
 if season != "All" and "Season" in df_base.columns:
     df_base = df_base[df_base["Season"].astype(str) == str(season)]
@@ -132,32 +117,51 @@ st.divider()
 # Metrics catalogue (your list)
 # ----------------------------
 METRICS_CATALOGUE = [
-    "Goals", "xG", "Assists", "xA", "Duels per 90", "Duels won, %", "Successful defensive actions per 90",
+    "Goals", "xG", "Assists", "xA",
+    "Duels per 90", "Duels won, %", "Successful defensive actions per 90",
     "Defensive duels per 90", "Defensive duels won, %", "Aerial duels per 90", "Aerial duels won, %",
-    "Sliding tackles per 90", "PAdj Sliding tackles", "Shots blocked per 90", "Interceptions per 90",
-    "PAdj Interceptions", "Fouls per 90", "Yellow cards", "Yellow cards per 90", "Red cards", "Red cards per 90",
-    "Successful attacking actions per 90", "Goals per 90", "Non-penalty goals", "Non-penalty goals per 90",
-    "xG per 90", "Head goals", "Head goals per 90", "Shots", "Shots per 90", "Shots on target, %", "Goal conversion, %",
-    "Assists per 90", "Crosses per 90", "Accurate crosses, %", "Crosses from left flank per 90",
-    "Accurate crosses from left flank, %", "Crosses from right flank per 90", "Accurate crosses from right flank, %",
-    "Crosses to goalie box per 90", "Dribbles per 90", "Successful dribbles, %", "Offensive duels per 90",
-    "Offensive duels won, %", "Touches in box per 90", "Progressive runs per 90", "Accelerations per 90",
-    "Received passes per 90", "Received long passes per 90", "Fouls suffered per 90", "Passes per 90",
-    "Accurate passes, %", "Forward passes per 90", "Accurate forward passes, %", "Back passes per 90",
-    "Accurate back passes, %", "Lateral passes per 90", "Accurate lateral passes, %", "Short / medium passes per 90",
-    "Accurate short / medium passes, %", "Long passes per 90", "Accurate long passes, %", "Average pass length, m",
-    "Average long pass length, m", "xA per 90", "Shot assists per 90", "Second assists per 90", "Third assists per 90",
-    "Smart passes per 90", "Accurate smart passes, %", "Key passes per 90", "Passes to final third per 90",
-    "Accurate passes to final third, %", "Passes to penalty area per 90", "Accurate passes to penalty area, %",
-    "Through passes per 90", "Accurate through passes, %", "Deep completions per 90", "Deep completed crosses per 90",
-    "Progressive passes per 90", "Accurate progressive passes, %", "Conceded goals", "Conceded goals per 90",
-    "Shots against", "Shots against per 90", "Clean sheets", "Save rate, %", "xG against", "xG against per 90",
-    "Prevented goals", "Prevented goals per 90", "Back passes received as GK per 90", "Exits per 90",
-    "Aerial duels per 90.1", "Free kicks per 90", "Direct free kicks per 90", "Direct free kicks on target, %",
+    "Sliding tackles per 90", "PAdj Sliding tackles", "Shots blocked per 90",
+    "Interceptions per 90", "PAdj Interceptions",
+    "Fouls per 90", "Yellow cards", "Yellow cards per 90", "Red cards", "Red cards per 90",
+    "Successful attacking actions per 90",
+    "Goals per 90", "Non-penalty goals", "Non-penalty goals per 90",
+    "xG per 90", "Head goals", "Head goals per 90",
+    "Shots", "Shots per 90", "Shots on target, %", "Goal conversion, %",
+    "Assists per 90",
+    "Crosses per 90", "Accurate crosses, %",
+    "Crosses from left flank per 90", "Accurate crosses from left flank, %",
+    "Crosses from right flank per 90", "Accurate crosses from right flank, %",
+    "Crosses to goalie box per 90",
+    "Dribbles per 90", "Successful dribbles, %",
+    "Offensive duels per 90", "Offensive duels won, %",
+    "Touches in box per 90", "Progressive runs per 90", "Accelerations per 90",
+    "Received passes per 90", "Received long passes per 90",
+    "Fouls suffered per 90",
+    "Passes per 90", "Accurate passes, %",
+    "Forward passes per 90", "Accurate forward passes, %",
+    "Back passes per 90", "Accurate back passes, %",
+    "Lateral passes per 90", "Accurate lateral passes, %",
+    "Short / medium passes per 90", "Accurate short / medium passes, %",
+    "Long passes per 90", "Accurate long passes, %",
+    "Average pass length, m", "Average long pass length, m",
+    "xA per 90", "Shot assists per 90", "Second assists per 90", "Third assists per 90",
+    "Smart passes per 90", "Accurate smart passes, %",
+    "Key passes per 90",
+    "Passes to final third per 90", "Accurate passes to final third, %",
+    "Passes to penalty area per 90", "Accurate passes to penalty area, %",
+    "Through passes per 90", "Accurate through passes, %",
+    "Deep completions per 90", "Deep completed crosses per 90",
+    "Progressive passes per 90", "Accurate progressive passes, %",
+    "Conceded goals", "Conceded goals per 90",
+    "Shots against", "Shots against per 90",
+    "Clean sheets", "Save rate, %", "xG against", "xG against per 90",
+    "Prevented goals", "Prevented goals per 90",
+    "Back passes received as GK per 90", "Exits per 90", "Aerial duels per 90.1",
+    "Free kicks per 90", "Direct free kicks per 90", "Direct free kicks on target, %",
     "Corners per 90", "Penalties taken", "Penalty conversion, %",
 ]
 
-# Lower is better → invert percentiles
+# Lower is better → invert percentiles / winner logic
 LOWER_BETTER = {
     "Fouls per 90",
     "Yellow cards", "Yellow cards per 90",
@@ -199,7 +203,7 @@ st.divider()
 # Side-by-side player pickers
 # ----------------------------
 st.subheader("Pick players (side by side)")
-st.caption("Each slot is filtered: League → Team → Main Position → Player (Season is applied globally at the top).")
+st.caption("Each slot is filtered: League → Team → Main Position → Player (Season applied globally above).")
 
 slots_per_row = 3
 rows = (int(n_players) + slots_per_row - 1) // slots_per_row
@@ -314,7 +318,7 @@ st.divider()
 # ----------------------------
 # Values + percentiles
 # ----------------------------
-st.subheader("Values and percentiles")
+st.subheader("Stat breakdown table (no scale)")
 
 peer_mode = st.radio(
     "Percentile peer pool",
@@ -324,7 +328,7 @@ peer_mode = st.radio(
         "Global (all filtered data)",
     ],
     index=0,
-    horizontal=False,
+    horizontal=True,
 )
 
 global_pool = df_base.copy()
@@ -333,7 +337,7 @@ global_pool["Position group"] = global_pool[pos_col].apply(map_position_group)
 values_tbl = pd.DataFrame(index=metrics)
 pct_tbl = pd.DataFrame(index=metrics)
 
-for i, r in sel_df.iterrows():
+for _, r in sel_df.iterrows():
     player_name = str(r["Player"]).strip()
     player_league = str(r[league_col]).strip()
     player_group = str(r["Position group"]).strip()
@@ -352,6 +356,7 @@ for i, r in sel_df.iterrows():
         v = to_num(pd.Series([r.get(m, np.nan)])).iloc[0]
         pop = pool[m] if m in pool.columns else pd.Series(dtype=float)
         pct = percentile_rank(v, pop)
+
         if m in LOWER_BETTER and not pd.isna(pct):
             pct = round(100.0 - pct, 2)
 
@@ -364,16 +369,60 @@ for i, r in sel_df.iterrows():
 values_tbl = values_tbl.round(2)
 pct_tbl = pct_tbl.round(2)
 
+
+def style_winners(values: pd.DataFrame):
+    """
+    Green + bold the best player per metric row.
+    For LOWER_BETTER metrics: minimum wins.
+    Otherwise: maximum wins.
+    """
+    def _row_style(row: pd.Series):
+        metric = row.name
+        nums = row.apply(_safe_float)
+        if nums.isna().all():
+            return [""] * len(row)
+
+        if metric in LOWER_BETTER:
+            best = nums.min(skipna=True)
+        else:
+            best = nums.max(skipna=True)
+
+        out = []
+        for v in nums:
+            if pd.isna(v) or pd.isna(best):
+                out.append("")
+            elif np.isclose(v, best, rtol=0, atol=1e-12):
+                out.append("color: #1a7f37; font-weight: 700;")  # green
+            else:
+                out.append("")
+        return out
+
+    return values.style.format("{:.2f}").apply(_row_style, axis=1)
+
+
 st.write("**Values (raw columns)**")
-st.dataframe(values_tbl.style.format("{:.2f}"), use_container_width=True)
+st.dataframe(style_winners(values_tbl), use_container_width=True, height=420)
 
 st.write("**Percentiles (0–100)**")
-styled = (
-    pct_tbl.style
-    .format("{:.2f}")  # display rounded to 2 decimals
-    .background_gradient(axis=None, cmap=color_scale, vmin=0, vmax=100)
-)
-st.dataframe(styled, use_container_width=True)
+# For percentiles, higher is always better after inversion, so max wins for all metrics
+def style_pct_winners(pcts: pd.DataFrame):
+    def _row_style(row: pd.Series):
+        nums = row.apply(_safe_float)
+        if nums.isna().all():
+            return [""] * len(row)
+        best = nums.max(skipna=True)
+        out = []
+        for v in nums:
+            if pd.isna(v) or pd.isna(best):
+                out.append("")
+            elif np.isclose(v, best, rtol=0, atol=1e-12):
+                out.append("color: #1a7f37; font-weight: 700;")
+            else:
+                out.append("")
+        return out
+    return pcts.style.format("{:.2f}").apply(_row_style, axis=1)
+
+st.dataframe(style_pct_winners(pct_tbl), use_container_width=True, height=420)
 
 csv_out = pct_tbl.reset_index().rename(columns={"index": "Metric"}).to_csv(index=False).encode("utf-8")
 st.download_button(
@@ -386,7 +435,7 @@ st.download_button(
 st.divider()
 
 # ----------------------------
-# Radar chart (percentiles)
+# Radar chart (percentiles) — filled
 # ----------------------------
 st.subheader("Radar (percentiles)")
 
@@ -395,22 +444,35 @@ if len(radar_metrics) < 3:
     st.info("Select at least 3 metrics to show a radar chart.")
     st.stop()
 
+# Basic Plotly palette (reliable)
+PLOTLY_COLORS = [
+    "#1f77b4", "#ff7f0e", "#2ca02c", "#d62728", "#9467bd", "#8c564b"
+]
+
 fig = go.Figure()
-for col in pct_tbl.columns:
-    vals = pct_tbl[col].tolist()
+
+for i, col_name in enumerate(pct_tbl.columns):
+    vals = pct_tbl[col_name].tolist()
+    color = PLOTLY_COLORS[i % len(PLOTLY_COLORS)]
+
     fig.add_trace(
         go.Scatterpolar(
             r=vals + [vals[0]],
             theta=radar_metrics + [radar_metrics[0]],
-            fill="none",
-            name=col,
+            name=col_name,
+            mode="lines",
+            line=dict(width=2, color=color),
+            fill="toself",                      # <-- fill the polygon
+            fillcolor=f"rgba({int(color[1:3],16)},{int(color[3:5],16)},{int(color[5:7],16)},{fill_opacity})",
         )
     )
 
 fig.update_layout(
-    polar=dict(radialaxis=dict(visible=True, range=[0, 100])),
+    polar=dict(
+        radialaxis=dict(visible=True, range=[0, 100]),
+    ),
     showlegend=True,
-    height=520,
+    height=560,
     margin=dict(l=20, r=20, t=30, b=20),
 )
 
