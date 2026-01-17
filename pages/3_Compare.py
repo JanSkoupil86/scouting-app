@@ -503,7 +503,10 @@ st.divider()
 # ----------------------------
 # Radar chart (percentiles) — filled
 # ----------------------------
-st.subheader("Radar (percentiles)")
+radar_title = "Radar (percentiles)"
+if selected_profile != "Manual (no profile)":
+    radar_title += f" — {selected_profile}"
+st.subheader(radar_title)
 
 radar_metrics = pct_tbl.index.tolist()
 if len(radar_metrics) < 3:
