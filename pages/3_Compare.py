@@ -541,3 +541,24 @@ fig.update_layout(
 )
 
 st.plotly_chart(fig, use_container_width=True)
+
+from src.report_pdf import build_compare_pdf
+
+st.divider()
+st.subheader("Export")
+
+if st.button("📄 Download one-page PDF report"):
+    pdf_buffer = build_compare_pdf(
+        title="Player Comparison Report",
+        subtitle=f"Profile: {selected_profile}" if selected_profile != "Manual (no profile)" else "",
+        profiles=pct_tbl.columns.tolist(),
+        table_df=pct_tbl.round(2),
+        radar_png_bytes=radar_png,
+    )
+
+    st.download_button(
+        label="Download PDF",
+        data=pdf_buffer,
+        file_name="player_comparison_report.pdf",
+        mime="application/pdf",
+    )
