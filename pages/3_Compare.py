@@ -1,4 +1,11 @@
+# pages/3_Compare.py
+# Compare page: cross-season player selection + profile-based metric presets + winner-highlight tables
+# + filled radar + PNG/PDF export (one-page report)
+
+import io
 import re
+from datetime import datetime
+
 import numpy as np
 import pandas as pd
 import streamlit as st
@@ -6,19 +13,24 @@ import plotly.graph_objects as go
 
 from src.profiles import PROFILES
 
+
+# ----------------------------
+# Page config
+# ----------------------------
 st.set_page_config(page_title="Compare", layout="wide")
 st.title("Compare")
+
 
 # ----------------------------
 # Load data
 # ----------------------------
 if "data" not in st.session_state:
-    st.warning("No data loaded yet. Go to the **app** page and upload a CSV.")
+    st.warning("No data loaded yet. Go to the **Home/app** page and upload a CSV.")
     st.stop()
 
 df = st.session_state["data"]
 if not isinstance(df, pd.DataFrame) or df.empty:
-    st.error("Loaded dataset is empty or invalid. Re-upload the CSV on the **app** page.")
+    st.error("Loaded dataset is empty or invalid. Re-upload the CSV on the Home/app page.")
     st.stop()
 
 required = ["Player", "Minutes played"]
@@ -27,22 +39,30 @@ if missing:
     st.error(f"Your CSV is missing required columns: {missing}")
     st.stop()
 
-# Column preferences
+
+# ----------------------------
+# Column choices
+# ----------------------------
 league_col = "Competition" if "Competition" in df.columns else ("League" if "League" in df.columns else None)
+
+# IMPORTANT: you asked to use "Team within selected timeframe" (not "Team")
 team_col = (
     "Team within selected timeframe"
     if "Team within selected timeframe" in df.columns
     else ("Team" if "Team" in df.columns else None)
 )
+
+# IMPORTANT: you asked to use "Main Position"
 pos_col = "Main Position" if "Main Position" in df.columns else ("Position" if "Position" in df.columns else None)
 
 if league_col is None or team_col is None or pos_col is None:
     st.error("Missing required columns. Need League/Competition, Team, and Main Position/Position columns.")
     st.stop()
 
-# Standardize string columns
+# Clean strings
 for col in ["Player", league_col, team_col, pos_col]:
     df[col] = df[col].astype(str).str.strip()
+
 
 # ----------------------------
 # Helpers
@@ -51,11 +71,17 @@ def to_num(s):
     return pd.to_numeric(s, errors="coerce")
 
 
-def percentile_rank(value, population: pd.Series):
-    pop = to_num(population).dropna()
-    if pop.empty or pd.isna(value):
+def unique_sorted(series: pd.Series) -> list[str]:
+    s = series.dropna().astype(str).str.strip()
+    s = s[(s != "") & (s.str.lower() != "nan")]
+    return sorted(s.unique().tolist())
+
+
+def safe_float(x):
+    try:
+        return float(x)
+    except Exception:
         return np.nan
-    return round((pop < float(value)).mean() * 100.0, 2)
 
 
 def map_position_group(position_str: str) -> str:
@@ -73,26 +99,13 @@ def map_position_group(position_str: str) -> str:
     return "OTHER"
 
 
-def unique_sorted(series: pd.Series) -> list[str]:
-    s = series.dropna().astype(str).str.strip()
-    s = s[(s != "") & (s.str.lower() != "nan")]
-    return sorted(s.unique().tolist())
-
-
-def _safe_float(x):
-    try:
-        return float(x)
-    except Exception:
-        return np.nan
-
-
 def extract_season_from_text(text: str) -> str | None:
     """
-    Extract season tokens from league text.
-    Handles:
-      - 2024-25 or 2024/25 -> 24/25
+    Extract season token from League/Competition text.
+    Supports:
+      - 2024-25 / 2024/25 -> 24/25
       - 24/25 -> 24/25
-      - standalone year 2024 -> 2024 (spring-fall leagues)
+      - 2024 / 2025 (spring-fall) -> 2024
     """
     if text is None:
         return None
@@ -115,6 +128,14 @@ def extract_season_from_text(text: str) -> str | None:
     return None
 
 
+def percentile_rank(value, population: pd.Series) -> float:
+    pop = to_num(population).dropna()
+    if pop.empty or pd.isna(value):
+        return np.nan
+    # percent strictly below
+    return round((pop < float(value)).mean() * 100.0, 2)
+
+
 # ----------------------------
 # Ensure Season exists
 # ----------------------------
@@ -127,9 +148,11 @@ df2.loc[df2["Season"].str.lower().isin(["nan", "none", ""]), "Season"] = np.nan
 
 if df2["Season"].dropna().empty:
     st.error(
-        "Could not derive a Season column. League/Competition must contain tokens like '2024-25', '24/25', or '2024'."
+        "Could not derive a Season column. League/Competition must contain tokens like "
+        "'2024-25', '24/25', or '2024'."
     )
     st.stop()
+
 
 # ----------------------------
 # Top controls
@@ -137,7 +160,7 @@ if df2["Season"].dropna().empty:
 c1, c2, c3 = st.columns([1, 1, 1])
 
 with c1:
-    n_players = st.number_input("Number of players to compare", 2, 6, 2, 1)
+    n_players = st.number_input("Number of players to compare", min_value=2, max_value=6, value=2, step=1)
 
 with c2:
     cross_season = st.toggle(
@@ -164,8 +187,9 @@ if df_base_global.empty:
 
 st.divider()
 
+
 # ----------------------------
-# Metrics catalogue (same list used to validate available metrics)
+# Metrics catalogue + lower-better set
 # ----------------------------
 METRICS_CATALOGUE = [
     "Goals", "xG", "Assists", "xA", "Duels per 90", "Duels won, %", "Successful defensive actions per 90",
@@ -204,17 +228,13 @@ LOWER_BETTER = {
 
 available_metrics = [m for m in METRICS_CATALOGUE if m in df_base_global.columns]
 
-# ----------------------------
-# Metrics selection: Manual + Profiles
-# ----------------------------
 st.subheader("Metrics")
-
 if not available_metrics:
     st.warning("None of the requested metrics were found in your dataset columns.")
     st.stop()
 
+# ---- Profile + manual metric selection
 profile_names = ["Manual (no profile)"] + sorted(PROFILES.keys())
-
 mcol1, mcol2, mcol3, mcol4 = st.columns([2, 1, 1, 1])
 
 with mcol1:
@@ -222,7 +242,7 @@ with mcol1:
         "Profiles (optional)",
         options=profile_names,
         index=0,
-        help="Pick a preset profile to populate metrics. You can still edit manually after applying.",
+        help="Pick a profile to populate metrics, then adjust manually if needed.",
     )
 
 with mcol2:
@@ -231,28 +251,27 @@ with mcol2:
         options=["Replace", "Add"],
         index=0,
         horizontal=True,
-        help="Replace overwrites current metrics. Add appends profile metrics.",
+        help="Replace overwrites current metrics. Add appends profile metrics to current selection.",
     )
 
 with mcol3:
     clear_metrics = st.button("Clear", use_container_width=True)
 
 with mcol4:
-    apply_profile = st.button(
-        "Apply",
-        use_container_width=True,
-        disabled=(selected_profile == "Manual (no profile)"),
-    )
+    apply_profile = st.button("Apply", use_container_width=True, disabled=(selected_profile == "Manual (no profile)"))
 
-# default compare metrics
+# Track the *applied* profile (not just selected in dropdown)
+if "compare_active_profile" not in st.session_state:
+    st.session_state["compare_active_profile"] = "Manual (no profile)"
+
+# Default metric list
 if "compare_metrics" not in st.session_state:
     defaults = [m for m in ["Goals per 90", "xG per 90", "Assists per 90", "xA per 90", "Duels won, %"] if m in available_metrics]
-    if not defaults:
-        defaults = available_metrics[:10]
-    st.session_state["compare_metrics"] = defaults
+    st.session_state["compare_metrics"] = defaults if defaults else available_metrics[:10]
 
 if clear_metrics:
     st.session_state["compare_metrics"] = []
+    st.session_state["compare_active_profile"] = "Manual (no profile)"
 
 if apply_profile and selected_profile != "Manual (no profile)":
     prof_metrics = [m for m in PROFILES[selected_profile] if m in available_metrics]
@@ -264,7 +283,11 @@ if apply_profile and selected_profile != "Manual (no profile)":
         else:
             merged = list(dict.fromkeys(st.session_state["compare_metrics"] + prof_metrics))
             st.session_state["compare_metrics"] = merged
+        st.session_state["compare_active_profile"] = selected_profile
 
+active_profile = st.session_state.get("compare_active_profile", "Manual (no profile)")
+
+# Show missing metrics for transparency
 if selected_profile != "Manual (no profile)":
     missing_in_data = [m for m in PROFILES[selected_profile] if m not in available_metrics]
     if missing_in_data:
@@ -283,11 +306,12 @@ if not metrics:
 
 st.divider()
 
+
 # ----------------------------
 # Side-by-side selectors (Season first)
 # ----------------------------
 st.subheader("Pick players (side by side)")
-st.caption("Each slot: Season → League → Team → Main Position → Player. This prevents duplicate player rows across seasons.")
+st.caption("Each slot: Season → League → Team → Main Position → Player (prevents duplicate player rows across seasons).")
 
 slots_per_row = 3
 rows = (int(n_players) + slots_per_row - 1) // slots_per_row
@@ -295,8 +319,8 @@ rows = (int(n_players) + slots_per_row - 1) // slots_per_row
 selections = []
 slot_idx = 0
 
-for r in range(rows):
-    cols = st.columns(min(slots_per_row, int(n_players) - r * slots_per_row))
+for _r in range(rows):
+    cols = st.columns(min(slots_per_row, int(n_players) - _r * slots_per_row))
     for col in cols:
         slot_idx += 1
         with col:
@@ -355,7 +379,6 @@ for r in range(rows):
 
             player_val = st.selectbox(f"Player {slot_idx}", options=players, key=f"player_{slot_idx}")
 
-            # resolve (if still duplicates, pick max minutes)
             cand = df_p[df_p["Player"].astype(str) == str(player_val)].copy()
             cand["__mins"] = to_num(cand["Minutes played"]).fillna(0)
             cand = cand.sort_values("__mins", ascending=False)
@@ -371,6 +394,7 @@ sel_df = sel_df.copy()
 sel_df["Position group"] = sel_df[pos_col].apply(map_position_group)
 
 st.divider()
+
 
 # ----------------------------
 # Profiles block
@@ -399,6 +423,7 @@ for i, col in enumerate(pcols):
             st.write(f"**{f}:** {v}")
 
 st.divider()
+
 
 # ----------------------------
 # Stat tables (winner highlight, no scale)
@@ -448,17 +473,18 @@ for _, r in sel_df.iterrows():
         vals.append(v)
         pcts.append(pct)
 
-    values_tbl[f"{player_name} ({player_season})"] = vals
-    pct_tbl[f"{player_name} ({player_season})"] = pcts
+    col_name = f"{player_name} ({player_season})"
+    values_tbl[col_name] = vals
+    pct_tbl[col_name] = pcts
 
 values_tbl = values_tbl.round(2)
 pct_tbl = pct_tbl.round(2)
 
 
-def style_winners(values: pd.DataFrame):
+def style_values_winners(values: pd.DataFrame):
     def _row_style(row: pd.Series):
         metric = row.name
-        nums = row.apply(_safe_float)
+        nums = row.apply(safe_float)
         if nums.isna().all():
             return [""] * len(row)
         best = nums.min(skipna=True) if metric in LOWER_BETTER else nums.max(skipna=True)
@@ -471,12 +497,13 @@ def style_winners(values: pd.DataFrame):
             else:
                 out.append("")
         return out
+
     return values.style.format("{:.2f}").apply(_row_style, axis=1)
 
 
 def style_pct_winners(pcts: pd.DataFrame):
     def _row_style(row: pd.Series):
-        nums = row.apply(_safe_float)
+        nums = row.apply(safe_float)
         if nums.isna().all():
             return [""] * len(row)
         best = nums.max(skipna=True)
@@ -489,23 +516,25 @@ def style_pct_winners(pcts: pd.DataFrame):
             else:
                 out.append("")
         return out
+
     return pcts.style.format("{:.2f}").apply(_row_style, axis=1)
 
 
 st.write("**Values (raw columns)**")
-st.dataframe(style_winners(values_tbl), use_container_width=True, height=420)
+st.dataframe(style_values_winners(values_tbl), use_container_width=True, height=420)
 
 st.write("**Percentiles (0–100)**")
 st.dataframe(style_pct_winners(pct_tbl), use_container_width=True, height=420)
 
 st.divider()
 
+
 # ----------------------------
-# Radar chart (percentiles) — filled
+# Radar chart (percentiles) — filled + profile name in title if applied
 # ----------------------------
 radar_title = "Radar (percentiles)"
-if selected_profile != "Manual (no profile)":
-    radar_title += f" — {selected_profile}"
+if active_profile != "Manual (no profile)":
+    radar_title += f" — {active_profile}"
 st.subheader(radar_title)
 
 radar_metrics = pct_tbl.index.tolist()
@@ -540,25 +569,138 @@ fig.update_layout(
     margin=dict(l=20, r=20, t=30, b=20),
 )
 
+# Export radar as PNG bytes (requires kaleido in requirements.txt: `kaleido`)
+radar_png = None
+try:
+    import plotly.io as pio
+
+    radar_png = pio.to_image(fig, format="png", width=900, height=900)
+except Exception:
+    radar_png = None
+
 st.plotly_chart(fig, use_container_width=True)
 
-from src.report_pdf import build_compare_pdf
-
 st.divider()
+
+
+# ----------------------------
+# Export: PNG + One-page PDF
+# ----------------------------
 st.subheader("Export")
 
-if st.button("📄 Download one-page PDF report"):
-    pdf_buffer = build_compare_pdf(
-        title="Player Comparison Report",
-        subtitle=f"Profile: {selected_profile}" if selected_profile != "Manual (no profile)" else "",
-        profiles=pct_tbl.columns.tolist(),
-        table_df=pct_tbl.round(2),
+if radar_png is None:
+    st.info("Radar PNG export is unavailable. Add `kaleido` to requirements.txt to enable PNG/PDF export.")
+else:
+    st.download_button(
+        "Download radar (PNG)",
+        data=radar_png,
+        file_name="compare_radar.png",
+        mime="image/png",
+        use_container_width=True,
+    )
+
+
+def build_one_page_pdf(
+    title: str,
+    subtitle: str,
+    player_headers: list[str],
+    percentile_table: pd.DataFrame,
+    radar_png_bytes: bytes,
+) -> bytes:
+    """
+    Creates a single-page PDF (landscape A4) with:
+      - title/subtitle
+      - player headers
+      - percentiles table (truncated if too long)
+      - radar image
+    """
+    from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, Image
+    from reportlab.lib.styles import getSampleStyleSheet
+    from reportlab.lib.pagesizes import A4, landscape
+    from reportlab.lib import colors
+
+    buf = io.BytesIO()
+    doc = SimpleDocTemplate(
+        buf,
+        pagesize=landscape(A4),
+        leftMargin=26,
+        rightMargin=26,
+        topMargin=18,
+        bottomMargin=18,
+    )
+    styles = getSampleStyleSheet()
+    story = []
+
+    story.append(Paragraph(f"<b>{title}</b>", styles["Title"]))
+    if subtitle:
+        story.append(Paragraph(subtitle, styles["Normal"]))
+    story.append(Spacer(1, 10))
+
+    # Player line
+    story.append(Paragraph("<b>Players:</b> " + " | ".join(player_headers), styles["Normal"]))
+    story.append(Spacer(1, 10))
+
+    # Table: limit rows to keep one page readable
+    max_rows = 20
+    tbl_df = percentile_table.copy()
+    if len(tbl_df) > max_rows:
+        tbl_df = tbl_df.iloc[:max_rows, :]
+
+    # Build table data (Metric + players)
+    table_data = [[tbl_df.index.name or "Metric"] + list(tbl_df.columns)]
+    for idx, row in tbl_df.iterrows():
+        table_data.append([str(idx)] + [f"{safe_float(v):.2f}" if pd.notna(v) else "" for v in row.tolist()])
+
+    table = Table(table_data, repeatRows=1)
+    table.setStyle(
+        TableStyle(
+            [
+                ("GRID", (0, 0), (-1, -1), 0.5, colors.grey),
+                ("BACKGROUND", (0, 0), (-1, 0), colors.lightgrey),
+                ("FONT", (0, 0), (-1, 0), "Helvetica-Bold"),
+                ("ALIGN", (1, 1), (-1, -1), "CENTER"),
+                ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+                ("FONTSIZE", (0, 0), (-1, -1), 8),
+                ("FONTSIZE", (0, 0), (-1, 0), 9),
+            ]
+        )
+    )
+    story.append(table)
+
+    if len(percentile_table) > max_rows:
+        story.append(Spacer(1, 6))
+        story.append(Paragraph(f"Table truncated to first {max_rows} metrics for one-page layout.", styles["Normal"]))
+
+    story.append(Spacer(1, 10))
+
+    # Radar image
+    img = Image(io.BytesIO(radar_png_bytes))
+    img.drawHeight = 300
+    img.drawWidth = 300
+    story.append(img)
+
+    doc.build(story)
+    buf.seek(0)
+    return buf.read()
+
+
+if radar_png is not None:
+    report_title = "Player Comparison Report"
+    report_subtitle = f"Profile: {active_profile}" if active_profile != "Manual (no profile)" else ""
+    report_subtitle += ((" | " if report_subtitle else "") + f"Generated: {datetime.utcnow().strftime('%Y-%m-%d %H:%M UTC')}")
+
+    pdf_bytes = build_one_page_pdf(
+        title=report_title,
+        subtitle=report_subtitle,
+        player_headers=pct_tbl.columns.tolist(),
+        percentile_table=pct_tbl.round(2),
         radar_png_bytes=radar_png,
     )
 
     st.download_button(
-        label="Download PDF",
-        data=pdf_buffer,
+        "Download one-page PDF report",
+        data=pdf_bytes,
         file_name="player_comparison_report.pdf",
         mime="application/pdf",
+        use_container_width=True,
     )
