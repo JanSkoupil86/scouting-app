@@ -1,6 +1,7 @@
 streamlit>=1.30
 pandas
 numpy
-plotly
+plotly>=5.18.0
 matplotlib
-kaleido>=0.2.1
+kaleido==0.2.1.post1
+reportlab
