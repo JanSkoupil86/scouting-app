@@ -242,31 +242,87 @@ table_df["Minutes played"] = to_num(table_df["Minutes played"]).round(0).astype(
 st.dataframe(table_df, use_container_width=True, height=360)
 
 # -----------------------------
-# Age vs Market Value (same cohort)
+# Scatter 2: Dynamic (same cohort as plot above)
 # -----------------------------
-age_col = "Age" if "Age" in dff.columns else None
-mv_col = "Market value" if "Market value" in dff.columns else None
+st.subheader("Custom scatter (same players as plot above)")
 
-st.subheader("Age vs Market Value (same players as plot above)")
+# Build candidate numeric columns for this scatter (including Minutes/Age/Market value if present)
+always_try = ["Age", "Market value", "Minutes played", "Matches played"]
+candidates = []
+for c in always_try + numeric_cols:
+    if c in dff.columns and c not in candidates:
+        candidates.append(c)
 
-if age_col is None or mv_col is None:
-    st.info("Age and/or Market value columns not present in the dataset.")
+# Fallback if nothing numeric
+if not candidates:
+    st.info("No numeric columns available for the custom scatter.")
 else:
-    dff[age_col] = to_num(dff[age_col])
-    dff[mv_col] = to_num(dff[mv_col]).fillna(0)
+    s1, s2, s3 = st.columns([1, 1, 1])
 
-    fig2 = px.scatter(
-        dff.dropna(subset=[age_col]),
-        x=mv_col,
-        y=age_col,
-        hover_name="Player",
-        hover_data={team_col: True, "Season": True, "Minutes played": True},
-    )
-    fig2.update_layout(
-        title=f"{league} — {pos_group} — Market Value vs Age",
-        height=420,
-        margin=dict(l=20, r=20, t=60, b=20),
-    )
-    st.plotly_chart(fig2, use_container_width=True)
+    with s1:
+        x2 = st.selectbox(
+            "X axis",
+            options=candidates,
+            index=candidates.index("Market value") if "Market value" in candidates else 0,
+            key="scatter2_x",
+        )
 
-    st.caption("Some market values may be missing and are set to 0.")
+    with s2:
+        # default Y to Age if present
+        y2 = st.selectbox(
+            "Y axis",
+            options=candidates,
+            index=candidates.index("Age") if "Age" in candidates else min(1, len(candidates) - 1),
+            key="scatter2_y",
+        )
+
+    with s3:
+        # how to treat missing values for the selected axes
+        missing_mode = st.selectbox(
+            "Missing values",
+            options=["Drop rows", "Set missing to 0"],
+            index=0,
+            key="scatter2_missing",
+        )
+
+    dd = dff.copy()
+
+    # Convert chosen axes to numeric
+    dd[x2] = to_num(dd[x2])
+    dd[y2] = to_num(dd[y2])
+
+    if missing_mode == "Set missing to 0":
+        dd[x2] = dd[x2].fillna(0)
+        dd[y2] = dd[y2].fillna(0)
+    else:
+        dd = dd.dropna(subset=[x2, y2])
+
+    if dd.empty:
+        st.info("No rows available after missing-value handling.")
+    else:
+        # If Market value is selected, it's common that values are missing or 0
+        if x2 == "Market value":
+            st.caption("Note: Some market values may be missing; choose 'Set missing to 0' or switch axis.")
+        if y2 == "Market value":
+            st.caption("Note: Some market values may be missing; choose 'Set missing to 0' or switch axis.")
+
+        fig2 = px.scatter(
+            dd,
+            x=x2,
+            y=y2,
+            hover_name="Player",
+            hover_data={
+                team_col: True,
+                "Season": True,
+                "Minutes played": True,
+            },
+        )
+
+        fig2.update_layout(
+            title=f"{league} — {pos_group} — {x2} vs {y2}",
+            height=420,
+            margin=dict(l=20, r=20, t=60, b=20),
+        )
+
+        st.plotly_chart(fig2, use_container_width=True)
+        st.caption(f"Rows in plot: {len(dd)}")
