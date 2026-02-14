@@ -612,16 +612,140 @@ st.plotly_chart(fig_radar, use_container_width=True)
 # Z-score stripplot (with hover info)
 # -----------------------------
 st.markdown("### Z-scores (combined subset)")
-fig_z = zscore_stripplot(
-    cohort_df=bench_df,
-    players_df_labeled=selected_rows_labeled,
-    metrics=selected_metrics,
-    title=f"Z-scores within combined subset ({bench_label})",
-    color_map=color_map,
-    team_col=TEAM_COL,
-    league_col=LEAGUE_COL,
-)
-st.plotly_chart(fig_z, use_container_width=True)
+def zscore_stripplot(
+    cohort_df,
+    players_df_labeled,
+    metrics,
+    title="Z-scores",
+    color_map=None,
+    team_col="Team",
+    league_col="League"
+):
+    import numpy as np
+    import plotly.graph_objects as go
+    from plotly.subplots import make_subplots
+
+    if not metrics:
+        return go.Figure()
+
+    # Keep only numeric metrics that exist
+    metrics = [
+        m for m in metrics
+        if m in cohort_df.columns and pd.api.types.is_numeric_dtype(cohort_df[m])
+    ]
+
+    if not metrics:
+        return go.Figure()
+
+    fig = make_subplots(
+        rows=len(metrics),
+        cols=1,
+        shared_xaxes=True,
+        vertical_spacing=0.08
+    )
+
+    for i, m in enumerate(metrics, start=1):
+
+        # Z-scores for full cohort
+        mean = cohort_df[m].mean()
+        std = cohort_df[m].std(ddof=0)
+
+        if std == 0 or np.isnan(std):
+            continue
+
+        cohort_df[f"z_{m}"] = (cohort_df[m] - mean) / std
+
+        # ---- Grey cohort dots ----
+        fig.add_trace(
+            go.Scatter(
+                x=cohort_df[f"z_{m}"],
+                y=[0] * len(cohort_df),
+                mode="markers",
+                marker=dict(color="lightgrey", size=6),
+                showlegend=False,
+                hoverinfo="skip"
+            ),
+            row=i,
+            col=1
+        )
+
+        # ---- Selected players ----
+        for _, row_player in players_df_labeled.iterrows():
+
+            if m not in row_player:
+                continue
+
+            z_value = (row_player[m] - mean) / std
+
+            player_name = row_player.get("Player", "Player")
+            team_name = row_player.get(team_col, "")
+            league_name = row_player.get(league_col, "")
+            season_name = row_player.get("Season", "")
+            minutes = row_player.get("Minutes played", "")
+            age = row_player.get("Age", "")
+            raw_value = row_player[m]
+
+            color = color_map.get(player_name, "red") if color_map else "red"
+
+            fig.add_trace(
+                go.Scatter(
+                    x=[z_value],
+                    y=[0],
+                    mode="markers+text",
+                    text=[player_name],
+                    textposition="top center",
+                    marker=dict(
+                        size=12,
+                        color=color,
+                        symbol="diamond"
+                    ),
+                    customdata=[[team_name, season_name, league_name, minutes, age, raw_value]],
+                    hovertemplate=(
+                        "<b>%{text}</b><br>"
+                        "Squad: %{customdata[0][0]}<br>"
+                        "Season: %{customdata[0][1]}<br>"
+                        "League: %{customdata[0][2]}<br>"
+                        "Minutes: %{customdata[0][3]}<br>"
+                        "Age: %{customdata[0][4]}<br>"
+                        + m + ": %{customdata[0][5]:.2f}<br>"
+                        "Z: %{x:.2f}"
+                        "<extra></extra>"
+                    ),
+                    showlegend=False
+                ),
+                row=i,
+                col=1
+            )
+
+        # ---- Avg reference line ----
+        fig.add_vline(
+            x=0,
+            line_dash="dash",
+            line_color="black",
+            row=i,
+            col=1
+        )
+
+        fig.update_yaxes(
+            showticklabels=False,
+            row=i,
+            col=1
+        )
+
+        fig.update_xaxes(
+            title_text=m,
+            row=i,
+            col=1
+        )
+
+    fig.update_layout(
+        height=220 * len(metrics),
+        title=title,
+        showlegend=False,
+        template="plotly_white"
+    )
+
+    return fig
 
 # -----------------------------
 # Export
