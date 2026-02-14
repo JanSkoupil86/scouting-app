@@ -1,114 +1,79 @@
 # pages/3_Compare.py
-# Compare page: cross-season player selection + profile-based metric presets + winner-highlight tables
-# + filled radar + PNG/PDF export (one-page report)
-#
-# IMPORTANT:
-# - For PNG/PDF export of Plotly radar, add `kaleido` to requirements.txt.
-# - Uses:
-#   - League/Competition column: "Competition" if present else "League"
-#   - Team column: "Team within selected timeframe" (preferred) else "Team"
-#   - Position column: "Main Position" (preferred) else "Position"
+# Compare page (full): multi-player + cross-season mode, League→Team-dependent filters,
+# Main Position-based position filter, PROFILES presets + manual metrics,
+# Raw table (2 decimals), Percentile table (filled highlight), Radar (filled) + profile name,
+# Z-score stripplot (distribution dots + selected diamonds),
+# Optional exports (CSV/HTML; PNG/PDF if Kaleido works).
 
-import io
 import re
-from datetime import datetime
-
+import io
+import math
 import numpy as np
 import pandas as pd
 import streamlit as st
+import plotly.express as px
 import plotly.graph_objects as go
+from plotly.subplots import make_subplots
 
-from src.profiles import PROFILES
+# --- PROFILES (recommended in src/profiles.py). Fallback if not present.
+try:
+    from src.profiles import PROFILES
+except Exception:
+    PROFILES = {}
 
-
-# ----------------------------
-# Page config
-# ----------------------------
 st.set_page_config(page_title="Compare", layout="wide")
 st.title("Compare")
 
-
-# ----------------------------
-# Load data
-# ----------------------------
+# -----------------------------
+# Require uploaded data
+# -----------------------------
 if "data" not in st.session_state:
-    st.warning("No data loaded yet. Go to the **Home/app** page and upload a CSV.")
+    st.warning("No data loaded yet. Go to **Home** and upload a CSV.")
     st.stop()
 
 df = st.session_state["data"]
-if not isinstance(df, pd.DataFrame) or df.empty:
-    st.error("Loaded dataset is empty or invalid. Re-upload the CSV on the Home/app page.")
+if df is None or not isinstance(df, pd.DataFrame) or df.empty:
+    st.warning("Dataset is empty/invalid. Re-upload your CSV on Home.")
     st.stop()
+
+# -----------------------------
+# Column mapping (your conventions)
+# -----------------------------
+LEAGUE_COL = "Competition" if "Competition" in df.columns else ("League" if "League" in df.columns else None)
+TEAM_COL = "Team within selected timeframe" if "Team within selected timeframe" in df.columns else ("Team" if "Team" in df.columns else None)
+POS_COL = "Main Position" if "Main Position" in df.columns else ("Position" if "Position" in df.columns else None)
 
 required = ["Player", "Minutes played"]
 missing = [c for c in required if c not in df.columns]
+if LEAGUE_COL is None:
+    missing.append("Competition/League")
+if TEAM_COL is None:
+    missing.append("Team within selected timeframe/Team")
+if POS_COL is None:
+    missing.append("Main Position/Position")
+
 if missing:
-    st.error(f"Your CSV is missing required columns: {missing}")
+    st.error(f"Missing required columns: {missing}")
     st.stop()
 
+# Clean text cols
+for c in ["Player", LEAGUE_COL, TEAM_COL, POS_COL]:
+    df[c] = df[c].astype(str).str.strip()
 
-# ----------------------------
-# Column choices
-# ----------------------------
-league_col = "Competition" if "Competition" in df.columns else ("League" if "League" in df.columns else None)
-
-# Use Team within selected timeframe if available
-team_col = (
-    "Team within selected timeframe"
-    if "Team within selected timeframe" in df.columns
-    else ("Team" if "Team" in df.columns else None)
-)
-
-# Use Main Position if available
-pos_col = "Main Position" if "Main Position" in df.columns else ("Position" if "Position" in df.columns else None)
-
-if league_col is None or team_col is None or pos_col is None:
-    st.error("Missing required columns. Need League/Competition, Team, and Main Position/Position columns.")
-    st.stop()
-
-# Clean strings
-for col in ["Player", league_col, team_col, pos_col]:
-    df[col] = df[col].astype(str).str.strip()
-
-
-# ----------------------------
+# -----------------------------
 # Helpers
-# ----------------------------
+# -----------------------------
 def to_num(s):
     return pd.to_numeric(s, errors="coerce")
-
 
 def unique_sorted(series: pd.Series) -> list[str]:
     s = series.dropna().astype(str).str.strip()
     s = s[(s != "") & (s.str.lower() != "nan")]
     return sorted(s.unique().tolist())
 
-
-def safe_float(x):
-    try:
-        return float(x)
-    except Exception:
-        return np.nan
-
-
-def map_position_group(position_str: str) -> str:
-    if not position_str:
-        return "OTHER"
-    pos = str(position_str).upper()
-    if "GK" in pos:
-        return "GK"
-    if any(p in pos for p in ["CB", "LCB", "RCB", "LB", "RB", "LWB", "RWB"]):
-        return "DEF"
-    if any(p in pos for p in ["DMF", "CMF", "AMF", "LMF", "RMF"]):
-        return "MID"
-    if any(p in pos for p in ["CF", "SS", "ST", "LWF", "RWF", "LW", "RW"]):
-        return "FWD"
-    return "OTHER"
-
-
 def extract_season_from_text(text: str) -> str | None:
     """
-    Extract season token from League/Competition text.
+    Extract season token from Competition/League text.
     Supports:
       - 2024-25 / 2024/25 -> 24/25
       - 24/25 -> 24/25
@@ -134,579 +99,645 @@ def extract_season_from_text(text: str) -> str | None:
 
     return None
 
+def position_group(main_pos: str) -> str:
+    if not main_pos:
+        return "Other"
+    p = str(main_pos).upper()
 
-def percentile_rank(value, population: pd.Series) -> float:
-    pop = to_num(population).dropna()
-    if pop.empty or pd.isna(value):
-        return np.nan
-    return round((pop < float(value)).mean() * 100.0, 2)
+    if "GK" in p:
+        return "Goalkeeper"
+    if any(x in p for x in ["CB", "LCB", "RCB"]):
+        return "Center Back"
+    if any(x in p for x in ["LB", "LWB"]):
+        return "Left Back/WB"
+    if any(x in p for x in ["RB", "RWB"]):
+        return "Right Back/WB"
+    if "DMF" in p:
+        return "Defensive Midfield"
+    if any(x in p for x in ["CMF", "LCMF", "RCMF"]):
+        return "Center Midfield"
+    if "AMF" in p:
+        return "Attacking Midfield"
+    if any(x in p for x in ["LWF", "LW"]):
+        return "Left Wing"
+    if any(x in p for x in ["RWF", "RW"]):
+        return "Right Wing"
+    if any(x in p for x in ["CF", "ST", "SS"]):
+        return "Center Forward"
+    return "Other"
 
+def is_lower_better(metric_name: str) -> bool:
+    """Heuristic: metrics where lower values are better (invert percentiles/z)."""
+    m = (metric_name or "").lower()
+    bad_tokens = [
+        "conceded", "against", "foul", "yellow", "red", "error",
+        "shots against", "xg against", "cards", "penalties conceded",
+    ]
+    return any(t in m for t in bad_tokens)
 
-# ----------------------------
-# Ensure Season exists
-# ----------------------------
+def safe_metric_list(df_: pd.DataFrame) -> list[str]:
+    """Detect numeric-ish columns suitable for comparisons."""
+    exclude = {LEAGUE_COL, TEAM_COL, POS_COL, "Season", "Position Group", "Player"}
+    candidates = [c for c in df_.columns if c not in exclude]
+    out = []
+    for c in candidates:
+        s = to_num(df_[c])
+        if s.notna().sum() >= max(20, int(0.05 * len(df_))):
+            out.append(c)
+    return sorted(out)
+
+def compute_percentiles(cohort: pd.DataFrame, players: pd.DataFrame, metrics: list[str]) -> pd.DataFrame:
+    """
+    Returns a dataframe: rows = metrics, cols = selected player labels, values = percentile (0-100).
+    Percentiles computed within cohort distribution. Inverts if lower is better.
+    """
+    result = {}
+    for m in metrics:
+        s = to_num(cohort[m])
+        if s.notna().sum() < 10:
+            continue
+
+        # percentile for each value = rank position within cohort
+        ranks = s.rank(pct=True) * 100.0
+
+        # map value->percentile via interpolation on sorted pairs
+        # (rank(pct) already aligns to original index; we just lookup for players' values via CDF-like approach)
+        # Use numpy percentiles for stability:
+        cohort_vals = s.dropna().values
+        cohort_vals_sorted = np.sort(cohort_vals)
+
+        def pct_of_value(v):
+            if v is None or (isinstance(v, float) and np.isnan(v)):
+                return np.nan
+            # percentage of cohort <= v
+            return float(np.searchsorted(cohort_vals_sorted, v, side="right")) / len(cohort_vals_sorted) * 100.0
+
+        col = {}
+        for label, row in players.iterrows():
+            v = to_num(pd.Series([row[m]])).iloc[0]
+            p = pct_of_value(v)
+            if is_lower_better(m) and np.isfinite(p):
+                p = 100.0 - p
+            col[label] = p
+
+        result[m] = col
+
+    pct_df = pd.DataFrame(result).T  # rows=metrics
+    return pct_df
+
+def compute_zscores(cohort: pd.DataFrame, players: pd.DataFrame, metrics: list[str]) -> tuple[pd.DataFrame, dict, dict]:
+    """
+    Returns:
+      z_df: rows=metrics, cols=player labels, z-scores
+      mu, sd: dict per metric
+    Inverts sign if lower is better (so right = better).
+    """
+    mu, sd = {}, {}
+    z_out = {}
+    for m in metrics:
+        s = to_num(cohort[m])
+        if s.notna().sum() < 10:
+            continue
+        mu[m] = float(s.mean(skipna=True))
+        sd_m = float(s.std(skipna=True))
+        sd[m] = sd_m if sd_m > 1e-9 else np.nan
+
+        rowz = {}
+        for label, prow in players.iterrows():
+            v = to_num(pd.Series([prow[m]])).iloc[0]
+            if not np.isfinite(sd[m]) or pd.isna(v):
+                rowz[label] = np.nan
+            else:
+                z = (float(v) - mu[m]) / sd[m]
+                if is_lower_better(m) and np.isfinite(z):
+                    z = -z
+                rowz[label] = z
+        z_out[m] = rowz
+
+    z_df = pd.DataFrame(z_out).T
+    return z_df, mu, sd
+
+def zscore_stripplot(
+    cohort_df: pd.DataFrame,
+    players_df_labeled: pd.DataFrame,
+    metrics: list[str],
+    title: str,
+    color_map: dict[str, str],
+) -> go.Figure:
+    """
+    Grey dots = cohort z distribution; diamonds = selected players (labeled index).
+    Right = better (we invert lower-better metrics).
+    """
+    usable = []
+    for m in metrics:
+        if m in cohort_df.columns:
+            s = to_num(cohort_df[m])
+            if s.notna().sum() >= 10:
+                usable.append(m)
+
+    if not usable:
+        fig = go.Figure()
+        fig.update_layout(title="No usable metrics for z-score plot.")
+        return fig
+
+    # Precompute cohort z distributions
+    z_cohort = {}
+    for m in usable:
+        s = to_num(cohort_df[m])
+        mu = float(s.mean(skipna=True))
+        sd = float(s.std(skipna=True))
+        if sd <= 1e-9:
+            z = s * np.nan
+        else:
+            z = (s - mu) / sd
+            if is_lower_better(m):
+                z = -z
+        z_cohort[m] = z.dropna().values
+
+    fig = make_subplots(
+        rows=len(usable),
+        cols=1,
+        shared_xaxes=True,
+        vertical_spacing=0.02,
+        subplot_titles=usable,
+    )
+
+    for i, m in enumerate(usable, start=1):
+        zvals = z_cohort[m]
+        if len(zvals) == 0:
+            continue
+
+        # cohort dots
+        fig.add_trace(
+            go.Scatter(
+                x=zvals,
+                y=np.zeros(len(zvals)),
+                mode="markers",
+                marker=dict(size=6, color="rgba(140,140,140,0.45)"),
+                hovertemplate=f"{m}<br>z=%{{x:.2f}}<extra></extra>",
+                showlegend=False,
+            ),
+            row=i,
+            col=1,
+        )
+
+        # mean line at 0
+        fig.add_vline(x=0, line_width=1, line_dash="dash", line_color="rgba(80,80,80,0.65)", row=i, col=1)
+
+        # player diamonds
+        for label, row in players_df_labeled.iterrows():
+            v = to_num(pd.Series([row.get(m, np.nan)])).iloc[0]
+            # compute z using cohort mean/sd (again) for that metric
+            s = to_num(cohort_df[m])
+            mu = float(s.mean(skipna=True))
+            sd = float(s.std(skipna=True))
+            if sd <= 1e-9 or pd.isna(v):
+                continue
+            z = (float(v) - mu) / sd
+            if is_lower_better(m):
+                z = -z
+
+            fig.add_trace(
+                go.Scatter(
+                    x=[z],
+                    y=[0],
+                    mode="markers+text",
+                    marker=dict(size=10, symbol="diamond", color=color_map.get(label, "#1f77b4")),
+                    text=[label],
+                    textposition="top center",
+                    hovertemplate=f"{label}<br>{m}: {float(v):.2f}<br>z={float(z):.2f}<extra></extra>",
+                    name=label,
+                    showlegend=(i == 1),
+                ),
+                row=i,
+                col=1,
+            )
+
+        fig.update_yaxes(visible=False, row=i, col=1)
+
+    fig.update_xaxes(title_text="Z-score (0 = cohort average)", row=len(usable), col=1)
+    fig.update_layout(
+        title=title,
+        height=max(420, 120 * len(usable)),
+        margin=dict(l=20, r=20, t=70, b=40),
+    )
+    fig.add_annotation(x=-2.5, y=1.0, xref="x", yref="paper", text="Worse", showarrow=False, opacity=0.55)
+    fig.add_annotation(x=2.5, y=1.0, xref="x", yref="paper", text="Better", showarrow=False, opacity=0.55)
+    return fig
+
+def radar_percentiles(pct_df: pd.DataFrame, title: str, color_map: dict[str, str]) -> go.Figure:
+    """
+    pct_df: rows=metrics, cols=players (labels), values 0..100
+    """
+    metrics = pct_df.index.tolist()
+    fig = go.Figure()
+
+    for label in pct_df.columns:
+        vals = pct_df[label].values.astype(float)
+        # close the polygon
+        theta = metrics + [metrics[0]]
+        r = list(vals) + [vals[0]]
+        fig.add_trace(
+            go.Scatterpolar(
+                r=r,
+                theta=theta,
+                fill="toself",
+                name=label,
+                line=dict(color=color_map.get(label, None)),
+                opacity=0.35,
+            )
+        )
+
+    fig.update_layout(
+        title=title,
+        polar=dict(
+            radialaxis=dict(visible=True, range=[0, 100]),
+        ),
+        legend=dict(orientation="v"),
+        height=520,
+        margin=dict(l=30, r=30, t=60, b=30),
+    )
+    return fig
+
+# -----------------------------
+# Build Season + Position Group
+# -----------------------------
 df2 = df.copy()
 if "Season" not in df2.columns:
-    df2["Season"] = df2[league_col].apply(extract_season_from_text)
+    df2["Season"] = df2[LEAGUE_COL].apply(extract_season_from_text)
 
 df2["Season"] = df2["Season"].astype(str).str.strip()
 df2.loc[df2["Season"].str.lower().isin(["nan", "none", ""]), "Season"] = np.nan
 
-if df2["Season"].dropna().empty:
-    st.error(
-        "Could not derive a Season column. League/Competition must contain tokens like "
-        "'2024-25', '24/25', or '2024'."
-    )
+df2["Position Group"] = df2[POS_COL].apply(position_group)
+
+# Numeric candidate metrics
+numeric_cols = safe_metric_list(df2)
+if not numeric_cols:
+    st.error("No numeric metrics detected.")
     st.stop()
 
+# -----------------------------
+# Sidebar: Cohort Filters (League -> Team dependent)
+# -----------------------------
+with st.sidebar:
+    st.header("Player Filters")
 
-# ----------------------------
-# Top controls
-# ----------------------------
-c1, c2, c3 = st.columns([1, 1, 1])
-
-with c1:
-    n_players = st.number_input("Number of players to compare", min_value=2, max_value=6, value=2, step=1)
-
-with c2:
-    cross_season = st.toggle(
-        "Compare across seasons (per slot)",
-        value=True,
-        help="ON: each player slot chooses its own season. OFF: one global season filter for all slots.",
-    )
-
-with c3:
-    fill_opacity = st.slider("Radar fill opacity", 0.05, 0.60, 0.25, 0.05)
-
-global_season = None
-if not cross_season:
-    seasons = unique_sorted(df2["Season"])
-    global_season = st.selectbox("Season (global)", ["All"] + seasons, index=0)
-
-df_base_global = df2.copy()
-if (not cross_season) and global_season and global_season != "All":
-    df_base_global = df_base_global[df_base_global["Season"].astype(str) == str(global_season)]
-
-if df_base_global.empty:
-    st.info("No rows available after Season filtering.")
-    st.stop()
-
-st.divider()
-
-
-# ----------------------------
-# Metrics catalogue + lower-better set
-# ----------------------------
-METRICS_CATALOGUE = [
-    "Goals", "xG", "Assists", "xA", "Duels per 90", "Duels won, %", "Successful defensive actions per 90",
-    "Defensive duels per 90", "Defensive duels won, %", "Aerial duels per 90", "Aerial duels won, %",
-    "Sliding tackles per 90", "PAdj Sliding tackles", "Shots blocked per 90", "Interceptions per 90",
-    "PAdj Interceptions", "Fouls per 90", "Yellow cards", "Yellow cards per 90", "Red cards", "Red cards per 90",
-    "Successful attacking actions per 90", "Goals per 90", "Non-penalty goals", "Non-penalty goals per 90",
-    "xG per 90", "Head goals", "Head goals per 90", "Shots", "Shots per 90", "Shots on target, %", "Goal conversion, %",
-    "Assists per 90", "Crosses per 90", "Accurate crosses, %", "Crosses from left flank per 90",
-    "Accurate crosses from left flank, %", "Crosses from right flank per 90", "Accurate crosses from right flank, %",
-    "Crosses to goalie box per 90", "Dribbles per 90", "Successful dribbles, %", "Offensive duels per 90",
-    "Offensive duels won, %", "Touches in box per 90", "Progressive runs per 90", "Accelerations per 90",
-    "Received passes per 90", "Received long passes per 90", "Fouls suffered per 90", "Passes per 90",
-    "Accurate passes, %", "Forward passes per 90", "Accurate forward passes, %", "Back passes per 90",
-    "Accurate back passes, %", "Lateral passes per 90", "Accurate lateral passes, %", "Short / medium passes per 90",
-    "Accurate short / medium passes, %", "Long passes per 90", "Accurate long passes, %", "Average pass length, m",
-    "Average long pass length, m", "xA per 90", "Shot assists per 90", "Second assists per 90", "Third assists per 90",
-    "Smart passes per 90", "Accurate smart passes, %", "Key passes per 90", "Passes to final third per 90",
-    "Accurate passes to final third, %", "Passes to penalty area per 90", "Accurate passes to penalty area, %",
-    "Through passes per 90", "Accurate through passes, %", "Deep completions per 90", "Deep completed crosses per 90",
-    "Progressive passes per 90", "Accurate progressive passes, %", "Conceded goals", "Conceded goals per 90",
-    "Shots against", "Shots against per 90", "Clean sheets", "Save rate, %", "xG against", "xG against per 90",
-    "Prevented goals", "Prevented goals per 90", "Back passes received as GK per 90", "Exits per 90",
-    "Aerial duels per 90.1", "Free kicks per 90", "Direct free kicks per 90", "Direct free kicks on target, %",
-    "Corners per 90", "Penalties taken", "Penalty conversion, %",
-]
-
-LOWER_BETTER = {
-    "Fouls per 90",
-    "Yellow cards", "Yellow cards per 90",
-    "Red cards", "Red cards per 90",
-    "Conceded goals", "Conceded goals per 90",
-    "Shots against", "Shots against per 90",
-    "xG against", "xG against per 90",
-}
-
-available_metrics = [m for m in METRICS_CATALOGUE if m in df_base_global.columns]
-
-st.subheader("Metrics")
-if not available_metrics:
-    st.warning("None of the requested metrics were found in your dataset columns.")
-    st.stop()
-
-# ---- Profile + manual metric selection
-profile_names = ["Manual (no profile)"] + sorted(PROFILES.keys())
-mcol1, mcol2, mcol3, mcol4 = st.columns([2, 1, 1, 1])
-
-with mcol1:
-    selected_profile = st.selectbox(
-        "Profiles (optional)",
-        options=profile_names,
-        index=0,
-        help="Pick a profile to populate metrics, then adjust manually if needed.",
+    # Seasons (multi)
+    seasons_all = unique_sorted(df2["Season"])
+    seasons_selected = st.multiselect(
+        "Season(s)",
+        options=seasons_all,
+        default=seasons_all[:1] if seasons_all else [],
+        help="Select one or multiple seasons. 24/25 + 25/26 and/or 2024 + 2025.",
     )
 
-with mcol2:
-    apply_mode = st.radio(
-        "Apply mode",
-        options=["Replace", "Add"],
-        index=0,
-        horizontal=True,
-        help="Replace overwrites current metrics. Add appends profile metrics to current selection.",
+    df_f = df2.copy()
+    if seasons_selected:
+        df_f = df_f[df_f["Season"].astype(str).isin([str(s) for s in seasons_selected])]
+
+    # Leagues (multi)
+    leagues_all = unique_sorted(df_f[LEAGUE_COL])
+    leagues_selected = st.multiselect(
+        "League(s)",
+        options=leagues_all,
+        default=leagues_all[:1] if leagues_all else [],
+        help="Leagues available in selected seasons.",
     )
+    if leagues_selected:
+        df_f = df_f[df_f[LEAGUE_COL].astype(str).isin([str(l) for l in leagues_selected])]
 
-with mcol3:
-    clear_metrics = st.button("Clear", use_container_width=True)
+    # Minutes
+    df_f["Minutes played"] = to_num(df_f["Minutes played"]).fillna(0)
+    max_mins = int(df_f["Minutes played"].max()) if not df_f.empty else 0
+    min_minutes = st.slider("Minimum minutes", 0, max(200, max_mins), min(600, max_mins) if max_mins else 0, step=50)
+    df_f = df_f[df_f["Minutes played"] >= min_minutes]
 
-with mcol4:
-    apply_profile = st.button("Apply", use_container_width=True, disabled=(selected_profile == "Manual (no profile)"))
+    # Team (dependent on league + season)
+    teams_all = unique_sorted(df_f[TEAM_COL])
+    team_selected = st.selectbox("Team", ["All"] + teams_all, index=0)
+    if team_selected != "All":
+        df_f = df_f[df_f[TEAM_COL].astype(str) == str(team_selected)]
 
-# Track the *applied* profile (not just selected)
-if "compare_active_profile" not in st.session_state:
-    st.session_state["compare_active_profile"] = "Manual (no profile)"
+    # Position (use Main Position)
+    pos_all = unique_sorted(df_f[POS_COL])
+    pos_selected = st.selectbox("Main Position", ["All"] + pos_all, index=0)
+    if pos_selected != "All":
+        df_f = df_f[df_f[POS_COL].astype(str) == str(pos_selected)]
 
-# Default metric list
-if "compare_metrics" not in st.session_state:
-    defaults = [m for m in ["Goals per 90", "xG per 90", "Assists per 90", "xA per 90", "Duels won, %"] if m in available_metrics]
-    st.session_state["compare_metrics"] = defaults if defaults else available_metrics[:10]
+    # Position Group benchmark control
+    pos_group_all = unique_sorted(df_f["Position Group"])
+    pos_group_selected = st.selectbox("Position Group (benchmark)", ["All"] + pos_group_all, index=0)
+    if pos_group_selected != "All":
+        df_f = df_f[df_f["Position Group"].astype(str) == str(pos_group_selected)]
 
-if clear_metrics:
-    st.session_state["compare_metrics"] = []
-    st.session_state["compare_active_profile"] = "Manual (no profile)"
-
-if apply_profile and selected_profile != "Manual (no profile)":
-    prof_metrics = [m for m in PROFILES[selected_profile] if m in available_metrics]
-    if not prof_metrics:
-        st.warning("This profile has no metrics available in the current dataset.")
-    else:
-        if apply_mode == "Replace":
-            st.session_state["compare_metrics"] = prof_metrics
-        else:
-            merged = list(dict.fromkeys(st.session_state["compare_metrics"] + prof_metrics))
-            st.session_state["compare_metrics"] = merged
-        st.session_state["compare_active_profile"] = selected_profile
-
-active_profile = st.session_state.get("compare_active_profile", "Manual (no profile)")
-
-if selected_profile != "Manual (no profile)":
-    missing_in_data = [m for m in PROFILES[selected_profile] if m not in available_metrics]
-    if missing_in_data:
-        with st.expander("Profile metrics not found in this dataset"):
-            st.write(missing_in_data)
-
-metrics = st.multiselect(
-    "Select metrics for comparison",
-    options=available_metrics,
-    default=st.session_state["compare_metrics"],
-)
-st.session_state["compare_metrics"] = metrics
-
-if not metrics:
+# This df_f is the cohort basis (also used for percentiles/z-scores benchmark)
+if df_f.empty:
+    st.info("No players match the cohort filters. Adjust Season/League/Minutes.")
     st.stop()
 
-st.divider()
+league_label = " / ".join(leagues_selected) if leagues_selected else "All leagues"
+season_label = " / ".join(seasons_selected) if seasons_selected else "All seasons"
+bench_label = f"{pos_group_selected if pos_group_selected != 'All' else 'All positions'} | {league_label} | {season_label}"
 
+# -----------------------------
+# Compare Mode: different players vs same player across seasons
+# -----------------------------
+st.markdown("### Selection")
 
-# ----------------------------
-# Side-by-side selectors (Season first)
-# ----------------------------
-st.subheader("Pick players (side by side)")
-st.caption("Each slot: Season → League → Team → Main Position → Player.")
-
-slots_per_row = 3
-rows = (int(n_players) + slots_per_row - 1) // slots_per_row
-
-selections = []
-slot_idx = 0
-
-for _r in range(rows):
-    cols = st.columns(min(slots_per_row, int(n_players) - _r * slots_per_row))
-    for col in cols:
-        slot_idx += 1
-        with col:
-            st.markdown(f"## Player {slot_idx}")
-
-            base_for_slot = df2.copy()
-            if (not cross_season) and global_season and global_season != "All":
-                base_for_slot = base_for_slot[base_for_slot["Season"].astype(str) == str(global_season)]
-
-            seasons = unique_sorted(base_for_slot["Season"])
-            if not seasons:
-                st.warning("No seasons available.")
-                continue
-
-            if cross_season:
-                season_val = st.selectbox(f"Season {slot_idx}", options=seasons, key=f"season_{slot_idx}")
-            else:
-                season_val = global_season if global_season != "All" else seasons[0]
-                st.selectbox(
-                    f"Season {slot_idx}",
-                    options=[season_val],
-                    index=0,
-                    key=f"season_{slot_idx}_fixed",
-                    disabled=True,
-                )
-
-            df_s = base_for_slot[base_for_slot["Season"].astype(str) == str(season_val)]
-            leagues = unique_sorted(df_s[league_col])
-            if not leagues:
-                st.warning("No leagues available for this season.")
-                continue
-
-            league_val = st.selectbox(f"League {slot_idx}", options=leagues, key=f"league_{slot_idx}")
-            df_l = df_s[df_s[league_col].astype(str) == str(league_val)]
-
-            teams = unique_sorted(df_l[team_col])
-            if not teams:
-                st.warning("No teams available for this league.")
-                continue
-
-            team_val = st.selectbox(f"Team {slot_idx}", options=teams, key=f"team_{slot_idx}")
-            df_t = df_l[df_l[team_col].astype(str) == str(team_val)]
-
-            positions = unique_sorted(df_t[pos_col])
-            if not positions:
-                st.warning("No positions available for this team.")
-                continue
-
-            pos_val = st.selectbox(f"Position {slot_idx}", options=positions, key=f"pos_{slot_idx}")
-            df_p = df_t[df_t[pos_col].astype(str) == str(pos_val)]
-
-            players = unique_sorted(df_p["Player"])
-            if not players:
-                st.warning("No players available.")
-                continue
-
-            player_val = st.selectbox(f"Player {slot_idx}", options=players, key=f"player_{slot_idx}")
-
-            cand = df_p[df_p["Player"].astype(str) == str(player_val)].copy()
-            cand["__mins"] = to_num(cand["Minutes played"]).fillna(0)
-            cand = cand.sort_values("__mins", ascending=False)
-            chosen = cand.iloc[0].drop(labels=["__mins"])
-            selections.append(chosen)
-
-sel_df = pd.DataFrame(selections).reset_index(drop=True)
-if len(sel_df) != int(n_players):
-    st.info("Please complete selection in all player slots to continue.")
-    st.stop()
-
-sel_df = sel_df.copy()
-sel_df["Position group"] = sel_df[pos_col].apply(map_position_group)
-
-st.divider()
-
-
-# ----------------------------
-# Profiles block
-# ----------------------------
-st.subheader("Profiles")
-
-profile_fields = ["Season", league_col, team_col, pos_col, "Position group", "Age", "Minutes played", "Matches played", "Market value"]
-profile_fields = [c for c in profile_fields if c in sel_df.columns]
-
-pcols = st.columns(len(sel_df))
-for i, col in enumerate(pcols):
-    with col:
-        st.markdown(f"### {sel_df.iloc[i]['Player']}")
-        for f in profile_fields:
-            v = sel_df.iloc[i].get(f, "")
-            if f in ["Minutes played", "Matches played", "Age"] and pd.notna(v):
-                try:
-                    v = int(float(v))
-                except Exception:
-                    pass
-            if f == "Market value" and pd.notna(v):
-                try:
-                    v = f"{int(float(v)):,}"
-                except Exception:
-                    pass
-            st.write(f"**{f}:** {v}")
-
-st.divider()
-
-
-# ----------------------------
-# Stat tables (winner highlight, no scale)
-# ----------------------------
-st.subheader("Stat breakdown table (no scale)")
-
-peer_mode = st.radio(
-    "Percentile peer pool",
-    options=[
-        "Within each player's Season + League + Position group",
-        "Within each player's Season + League (no position grouping)",
-        "Global (all filtered data)",
-    ],
-    index=0,
+mode = st.radio(
+    "Compare mode",
+    ["Compare players", "Same player across seasons"],
     horizontal=True,
 )
 
-global_pool = df_base_global.copy()
-global_pool["Position group"] = global_pool[pos_col].apply(map_position_group)
+# Choose number of comparison slots (2–5)
+n_players = st.number_input("Number of players to compare", min_value=2, max_value=5, value=2, step=1)
 
-values_tbl = pd.DataFrame(index=metrics)
-pct_tbl = pd.DataFrame(index=metrics)
+# Colors
+with st.expander("🎨 Customize player colors", expanded=False):
+    default_palette = ["#1f77b4", "#ff7f0e", "#2ca02c", "#d62728", "#9467bd"]
+    color_picks = []
+    for i in range(int(n_players)):
+        c = st.color_picker(f"Player {i+1} color", value=default_palette[i % len(default_palette)])
+        color_picks.append(c)
 
-for _, r in sel_df.iterrows():
-    player_name = str(r["Player"]).strip()
-    player_league = str(r[league_col]).strip()
-    player_season = str(r["Season"]).strip()
-    player_group = str(r["Position group"]).strip()
+# Build selection rows
+players_available = unique_sorted(df_f["Player"])
 
-    if peer_mode == "Global (all filtered data)":
-        pool = global_pool
-    else:
-        pool = df2.copy()
-        pool = pool[
-            (pool["Season"].astype(str) == player_season)
-            & (pool[league_col].astype(str) == player_league)
-        ].copy()
-        pool["Position group"] = pool[pos_col].apply(map_position_group)
-        if peer_mode == "Within each player's Season + League + Position group":
-            pool = pool[pool["Position group"] == player_group]
+selected_rows_labeled = pd.DataFrame()
+labels = []
 
-    vals = []
-    pcts = []
-    for m in metrics:
-        v = to_num(pd.Series([r.get(m, np.nan)])).iloc[0]
-        pop = pool[m] if m in pool.columns else pd.Series(dtype=float)
-        pct = percentile_rank(v, pop)
-        if m in LOWER_BETTER and not pd.isna(pct):
-            pct = round(100.0 - pct, 2)
-        vals.append(v)
-        pcts.append(pct)
+if mode == "Compare players":
+    # multi-select players (2..5) from cohort
+    selected_players = st.multiselect(
+        "Players to compare",
+        options=players_available,
+        default=players_available[: int(n_players)] if len(players_available) >= int(n_players) else players_available,
+        help="Pick players from the filtered cohort.",
+    )
+    selected_players = selected_players[: int(n_players)]
 
-    col_name = f"{player_name} ({player_season})"
-    values_tbl[col_name] = vals
-    pct_tbl[col_name] = pcts
+    if len(selected_players) < 2:
+        st.info("Select at least 2 players.")
+        st.stop()
 
-values_tbl = values_tbl.round(2)
-pct_tbl = pct_tbl.round(2)
+    # Pick *one row per player* (if player appears multiple times: choose best minutes within cohort)
+    tmp = df_f.copy()
+    tmp["_minutes"] = to_num(tmp["Minutes played"]).fillna(0)
+    chosen = (
+        tmp[tmp["Player"].isin(selected_players)]
+        .sort_values(["Player", "_minutes"], ascending=[True, False])
+        .groupby("Player", as_index=False)
+        .head(1)
+        .copy()
+    )
 
+    # Label = Player (Season)
+    chosen["Label"] = chosen.apply(lambda r: f"{r['Player']} ({r['Season']})" if pd.notna(r.get("Season")) else str(r["Player"]), axis=1)
+    selected_rows_labeled = chosen.set_index("Label")
+    labels = selected_rows_labeled.index.tolist()
 
-def style_values_winners(values: pd.DataFrame):
-    def _row_style(row: pd.Series):
-        metric = row.name
-        nums = row.apply(safe_float)
-        if nums.isna().all():
-            return [""] * len(row)
-        best = nums.min(skipna=True) if metric in LOWER_BETTER else nums.max(skipna=True)
-        out = []
-        for v in nums:
-            if pd.isna(v) or pd.isna(best):
-                out.append("")
-            elif np.isclose(v, best, rtol=0, atol=1e-12):
-                out.append("color: #1a7f37; font-weight: 700;")
-            else:
-                out.append("")
-        return out
-    return values.style.format("{:.2f}").apply(_row_style, axis=1)
+else:
+    # same player across seasons
+    p = st.selectbox("Player", options=players_available)
+    seasons_for_player = unique_sorted(df_f[df_f["Player"].astype(str) == str(p)]["Season"])
 
+    if len(seasons_for_player) < 2:
+        st.info("This player has fewer than 2 seasons in the current cohort filters. Expand Season/League filters.")
+        st.stop()
 
-def style_pct_winners(pcts: pd.DataFrame):
-    def _row_style(row: pd.Series):
-        nums = row.apply(safe_float)
-        if nums.isna().all():
-            return [""] * len(row)
-        best = nums.max(skipna=True)
-        out = []
-        for v in nums:
-            if pd.isna(v) or pd.isna(best):
-                out.append("")
-            elif np.isclose(v, best, rtol=0, atol=1e-12):
-                out.append("color: #1a7f37; font-weight: 700;")
-            else:
-                out.append("")
-        return out
-    return pcts.style.format("{:.2f}").apply(_row_style, axis=1)
+    seasons_pick = st.multiselect(
+        "Select seasons for this player",
+        options=seasons_for_player,
+        default=seasons_for_player[:2],
+        help="Pick two (or more) seasons to compare for the same player.",
+    )
+    seasons_pick = seasons_pick[: int(n_players)]  # respect slots
 
+    if len(seasons_pick) < 2:
+        st.info("Select at least 2 seasons for this player.")
+        st.stop()
 
-st.write("**Values (raw columns)**")
-st.dataframe(style_values_winners(values_tbl), use_container_width=True, height=420)
+    tmp = df_f[(df_f["Player"].astype(str) == str(p)) & (df_f["Season"].astype(str).isin([str(s) for s in seasons_pick]))].copy()
+    tmp["_minutes"] = to_num(tmp["Minutes played"]).fillna(0)
 
-st.write("**Percentiles (0–100)**")
-st.dataframe(style_pct_winners(pct_tbl), use_container_width=True, height=420)
+    # If duplicates per season (e.g., mid-season transfer), choose max minutes row per season
+    chosen = (
+        tmp.sort_values(["Season", "_minutes"], ascending=[True, False])
+        .groupby("Season", as_index=False)
+        .head(1)
+        .copy()
+    )
+    chosen["Label"] = chosen.apply(lambda r: f"{r['Player']} ({r['Season']})", axis=1)
+    selected_rows_labeled = chosen.set_index("Label")
+    labels = selected_rows_labeled.index.tolist()
 
-st.divider()
+    if len(labels) < 2:
+        st.info("Not enough season rows found for this player.")
+        st.stop()
 
-
-# ----------------------------
-# Radar chart (percentiles) — filled + profile name when applied
-# ----------------------------
-radar_title = "Radar (percentiles)"
-if active_profile != "Manual (no profile)":
-    radar_title += f" — {active_profile}"
-st.subheader(radar_title)
-
-radar_metrics = pct_tbl.index.tolist()
-if len(radar_metrics) < 3:
-    st.info("Select at least 3 metrics to show a radar chart.")
+# Update n_players to actual selected count (important if user selected fewer)
+n_sel = len(labels)
+if n_sel < 2:
+    st.info("Select at least 2 comparable entries.")
     st.stop()
 
-PLOTLY_COLORS = ["#1f77b4", "#ff7f0e", "#2ca02c", "#d62728", "#9467bd", "#8c564b"]
+# Color map aligned to labels
+color_map = {labels[i]: color_picks[i % len(color_picks)] for i in range(n_sel)}
 
-fig = go.Figure()
-for i, col_name in enumerate(pct_tbl.columns):
-    vals = pct_tbl[col_name].tolist()
-    color = PLOTLY_COLORS[i % len(PLOTLY_COLORS)]
-    r_, g_, b_ = int(color[1:3], 16), int(color[3:5], 16), int(color[5:7], 16)
+# -----------------------------
+# Metric selection: Profiles + manual
+# -----------------------------
+st.markdown("### Metrics")
 
-    fig.add_trace(
-        go.Scatterpolar(
-            r=vals + [vals[0]],
-            theta=radar_metrics + [radar_metrics[0]],
-            name=col_name,
-            mode="lines",
-            line=dict(width=2, color=color),
-            fill="toself",
-            fillcolor=f"rgba({r_},{g_},{b_},{fill_opacity})",
-        )
-    )
+profile_names = ["(Manual)"] + sorted(list(PROFILES.keys())) if PROFILES else ["(Manual)"]
+profile_choice = st.selectbox("Metric profile (optional)", profile_names, index=0)
 
-fig.update_layout(
-    polar=dict(radialaxis=dict(visible=True, range=[0, 100])),
-    showlegend=True,
-    height=560,
-    margin=dict(l=20, r=20, t=30, b=20),
+# Keep selection in session_state
+if "compare_metrics" not in st.session_state:
+    st.session_state["compare_metrics"] = []
+
+if "compare_profile" not in st.session_state:
+    st.session_state["compare_profile"] = "(Manual)"
+
+# Apply profile if changed and exists
+if profile_choice != st.session_state["compare_profile"]:
+    st.session_state["compare_profile"] = profile_choice
+    if profile_choice != "(Manual)" and profile_choice in PROFILES:
+        # keep only metrics that exist
+        st.session_state["compare_metrics"] = [m for m in PROFILES[profile_choice] if m in df2.columns]
+
+# Manual selection always available (also works with profile as starting point)
+selected_metrics = st.multiselect(
+    "Select metrics for comparison",
+    options=numeric_cols,
+    default=st.session_state["compare_metrics"] if st.session_state["compare_metrics"] else [],
 )
 
-# Export radar as PNG bytes (requires kaleido)
-radar_png = None
-radar_export_error = None
-try:
-    import plotly.io as pio
-    radar_png = pio.to_image(fig, format="png", width=900, height=900)
-except Exception as e:
-    radar_png = None
-    radar_export_error = str(e)
+# Persist
+st.session_state["compare_metrics"] = selected_metrics
 
-st.plotly_chart(fig, use_container_width=True)
+if len(selected_metrics) < 3:
+    st.info("Select at least 3 metrics (radar + z-score plot becomes meaningful).")
+    st.stop()
+
+# -----------------------------
+# Cohort benchmark dataframe (for percentiles/z-scores)
+#   Use df_f as benchmark base. For cleaner benchmarking, ignore Team filter if Team != All (optional).
+# -----------------------------
+bench_df = df_f.copy()
+
+# Optional: you can benchmark against the whole league/posgroup even if a specific team is selected.
+# If you want that, uncomment:
+# if team_selected != "All":
+#     bench_df = df2.copy()
+#     if seasons_selected:
+#         bench_df = bench_df[bench_df["Season"].astype(str).isin([str(s) for s in seasons_selected])]
+#     if leagues_selected:
+#         bench_df = bench_df[bench_df[LEAGUE_COL].astype(str).isin([str(l) for l in leagues_selected])]
+#     bench_df["Minutes played"] = to_num(bench_df["Minutes played"]).fillna(0)
+#     bench_df = bench_df[bench_df["Minutes played"] >= min_minutes]
+#     if pos_selected != "All":
+#         bench_df = bench_df[bench_df[POS_COL].astype(str) == str(pos_selected)]
+#     if pos_group_selected != "All":
+#         bench_df = bench_df[bench_df["Position Group"].astype(str) == str(pos_group_selected)]
+
+# Ensure numeric columns are numeric in benchmark/players
+for m in selected_metrics:
+    bench_df[m] = to_num(bench_df[m])
+    selected_rows_labeled[m] = to_num(selected_rows_labeled[m])
+
+# -----------------------------
+# Profiles (player cards)
+# -----------------------------
+st.markdown("### Profiles")
+cols = st.columns(n_sel)
+
+for i, label in enumerate(labels):
+    row = selected_rows_labeled.loc[label]
+    with cols[i]:
+        st.markdown(f"**{label}**")
+        # Small details (safe if missing)
+        def sget(col):
+            return row[col] if col in selected_rows_labeled.columns else np.nan
+
+        st.caption(f"Season: {sget('Season')}")
+        st.caption(f"Competition: {sget(LEAGUE_COL)}")
+        st.caption(f"Team: {sget(TEAM_COL)}")
+        st.caption(f"Main Position: {sget(POS_COL)}")
+        if "Age" in selected_rows_labeled.columns:
+            st.caption(f"Age: {to_num(pd.Series([sget('Age')])).iloc[0] if pd.notna(sget('Age')) else '—'}")
+        st.caption(f"Minutes played: {int(to_num(pd.Series([sget('Minutes played')])).fillna(0).iloc[0])}")
+        if "Matches played" in selected_rows_labeled.columns:
+            st.caption(f"Matches played: {int(to_num(pd.Series([sget('Matches played')])).fillna(0).iloc[0])}")
 
 st.divider()
 
+# -----------------------------
+# Raw values table (no scale) — round 2 decimals
+# -----------------------------
+st.markdown("### Stat breakdown table (no scale)")
 
-# ----------------------------
-# Export: PNG + One-page PDF
-# ----------------------------
-st.subheader("Export")
+raw_tbl = pd.DataFrame(index=selected_metrics)
+for label in labels:
+    raw_tbl[label] = [float(selected_rows_labeled.loc[label].get(m, np.nan)) for m in selected_metrics]
 
-if radar_png is None:
-    st.info("Radar PNG export is unavailable. Add `kaleido` to requirements.txt to enable PNG/PDF export.")
-    with st.expander("Export debug details"):
-        st.write(radar_export_error or "Unknown error.")
-else:
-    st.download_button(
-        "Download radar (PNG)",
-        data=radar_png,
-        file_name="compare_radar.png",
-        mime="image/png",
-        use_container_width=True,
-    )
+raw_tbl = raw_tbl.round(2)
 
+# Show (keep it plain)
+st.dataframe(raw_tbl, use_container_width=True, height=380)
 
-def build_one_page_pdf(
-    title: str,
-    subtitle: str,
-    player_headers: list[str],
-    percentile_table: pd.DataFrame,
-    radar_png_bytes: bytes,
-) -> bytes:
-    """
-    Single-page PDF (landscape A4):
-      - title/subtitle
-      - player headers
-      - percentiles table (truncated for one-page)
-      - radar image
-    """
-    from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, Image
-    from reportlab.lib.styles import getSampleStyleSheet
-    from reportlab.lib.pagesizes import A4, landscape
-    from reportlab.lib import colors
+# -----------------------------
+# Percentiles table (0–100), optional highlighting
+# -----------------------------
+st.markdown("### Percentiles (0–100)")
 
-    buf = io.BytesIO()
-    doc = SimpleDocTemplate(
-        buf,
-        pagesize=landscape(A4),
-        leftMargin=26,
-        rightMargin=26,
-        topMargin=18,
-        bottomMargin=18,
-    )
-    styles = getSampleStyleSheet()
-    story = []
+pct_tbl = compute_percentiles(bench_df, selected_rows_labeled, selected_metrics).reindex(selected_metrics)
+pct_tbl = pct_tbl.round(2)
 
-    story.append(Paragraph(f"<b>{title}</b>", styles["Title"]))
-    if subtitle:
-        story.append(Paragraph(subtitle, styles["Normal"]))
-    story.append(Spacer(1, 8))
+# Styled (background gradient) with safe colormap (no custom cmap names)
+# Use plotly-like scale via pandas built-in (matplotlib required) can be brittle in Streamlit.
+# We'll do simple winner highlighting instead (robust).
+def highlight_winner(row):
+    vals = row.values.astype(float)
+    out = [""] * len(vals)
+    if np.all(np.isnan(vals)):
+        return out
+    j = int(np.nanargmax(vals))
+    out[j] = "font-weight: 700;"
+    return out
 
-    story.append(Paragraph("<b>Players:</b> " + " | ".join(player_headers), styles["Normal"]))
-    story.append(Spacer(1, 8))
+try:
+    styled = pct_tbl.style.apply(highlight_winner, axis=1)
+    st.dataframe(styled, use_container_width=True, height=380)
+except Exception:
+    # Fallback if pandas styler fails in environment
+    st.dataframe(pct_tbl, use_container_width=True, height=380)
 
-    # Table: cap rows to keep one page
-    max_rows = 20
-    tbl_df = percentile_table.copy()
-    if len(tbl_df) > max_rows:
-        tbl_df = tbl_df.iloc[:max_rows, :]
+# -----------------------------
+# Radar (percentiles) — include profile name if applicable
+# -----------------------------
+radar_title = "Radar (percentiles)"
+if profile_choice != "(Manual)":
+    radar_title += f" — {profile_choice}"
 
-    table_data = [[tbl_df.index.name or "Metric"] + list(tbl_df.columns)]
-    for idx, row in tbl_df.iterrows():
-        table_data.append([str(idx)] + [f"{safe_float(v):.2f}" if pd.notna(v) else "" for v in row.tolist()])
+fig_radar = radar_percentiles(
+    pct_tbl.fillna(0.0),
+    title=radar_title,
+    color_map=color_map,
+)
+st.plotly_chart(fig_radar, use_container_width=True)
 
-    table = Table(table_data, repeatRows=1)
-    table.setStyle(
-        TableStyle(
-            [
-                ("GRID", (0, 0), (-1, -1), 0.5, colors.grey),
-                ("BACKGROUND", (0, 0), (-1, 0), colors.lightgrey),
-                ("FONT", (0, 0), (-1, 0), "Helvetica-Bold"),
-                ("ALIGN", (1, 1), (-1, -1), "CENTER"),
-                ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
-                ("FONTSIZE", (0, 0), (-1, -1), 8),
-                ("FONTSIZE", (0, 0), (-1, 0), 9),
-            ]
+# -----------------------------
+# Z-scores (combined subset) — new feature
+# -----------------------------
+st.markdown("### Z-scores (combined subset)")
+
+fig_z = zscore_stripplot(
+    cohort_df=bench_df,
+    players_df_labeled=selected_rows_labeled,
+    metrics=selected_metrics,
+    title=f"Z-scores within combined subset ({bench_label})",
+    color_map=color_map,
+)
+st.plotly_chart(fig_z, use_container_width=True)
+
+# -----------------------------
+# Export (robust)
+# -----------------------------
+st.markdown("### Export")
+
+# CSV exports
+csv_raw = raw_tbl.reset_index().rename(columns={"index": "Metric"}).to_csv(index=False).encode("utf-8")
+st.download_button("Download raw values (CSV)", csv_raw, file_name="compare_raw.csv", mime="text/csv")
+
+csv_pct = pct_tbl.reset_index().rename(columns={"index": "Metric"}).to_csv(index=False).encode("utf-8")
+st.download_button("Download percentiles (CSV)", csv_pct, file_name="compare_percentiles.csv", mime="text/csv")
+
+# HTML export (quick single-file report)
+html = io.StringIO()
+html.write(f"<h2>Compare report</h2>")
+html.write(f"<p><b>Benchmark:</b> {bench_label}</p>")
+html.write(f"<p><b>Profile:</b> {profile_choice}</p>")
+html.write("<h3>Raw values</h3>")
+html.write(raw_tbl.to_html())
+html.write("<h3>Percentiles</h3>")
+html.write(pct_tbl.to_html())
+html_bytes = html.getvalue().encode("utf-8")
+st.download_button("Download report tables (HTML)", html_bytes, file_name="compare_report_tables.html", mime="text/html")
+
+# Optional: radar PNG via kaleido (works only if Kaleido available + Chromium available)
+with st.expander("Radar PNG export (optional)", expanded=False):
+    try:
+        import plotly.io as pio
+
+        radar_png = pio.to_image(fig_radar, format="png", width=1000, height=700)
+        st.download_button("Download radar (PNG)", radar_png, file_name="radar.png", mime="image/png")
+        st.success("Radar PNG export ready.")
+    except Exception as e:
+        st.info(
+            "Radar PNG export unavailable. If you're on Streamlit Cloud, ensure "
+            "`kaleido==0.2.1.post1` is in requirements.txt (bundled Chromium)."
         )
-    )
-    story.append(table)
-
-    if len(percentile_table) > max_rows:
-        story.append(Spacer(1, 6))
-        story.append(Paragraph(f"Table truncated to first {max_rows} metrics for one-page layout.", styles["Normal"]))
-
-    story.append(Spacer(1, 10))
-
-    img = Image(io.BytesIO(radar_png_bytes))
-    img.drawHeight = 300
-    img.drawWidth = 300
-    story.append(img)
-
-    doc.build(story)
-    buf.seek(0)
-    return buf.read()
-
-
-if radar_png is not None:
-    report_title = "Player Comparison Report"
-    report_subtitle = f"Profile: {active_profile}" if active_profile != "Manual (no profile)" else ""
-    report_subtitle += ((" | " if report_subtitle else "") + f"Generated: {datetime.utcnow().strftime('%Y-%m-%d %H:%M UTC')}")
-
-    pdf_bytes = build_one_page_pdf(
-        title=report_title,
-        subtitle=report_subtitle,
-        player_headers=pct_tbl.columns.tolist(),
-        percentile_table=pct_tbl.round(2),
-        radar_png_bytes=radar_png,
-    )
-
-    st.download_button(
-        "Download one-page PDF report",
-        data=pdf_bytes,
-        file_name="player_comparison_report.pdf",
-        mime="application/pdf",
-        use_container_width=True,
-    )
+        st.caption(f"Export debug: {e}")
