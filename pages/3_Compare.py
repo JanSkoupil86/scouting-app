@@ -1,11 +1,12 @@
 # pages/3_Compare.py
-# Compare page (full): multi-player + cross-season mode, League→Team-dependent filters,
-# Main Position-based position filter, PROFILES presets + manual metrics,
-# Raw table (2 decimals), Percentile table (winner bold),
-# Radar (filled) + profile name,
-# Z-score stripplot (distribution dots + selected diamonds with rich hover),
-# Age slicer (below minutes) in sidebar,
-# Optional exports.
+# FULL Compare page (with fixes):
+# - Sidebar filters: Season(s), League(s), Minimum minutes, ✅ Age range (below minutes),
+#   Team (dependent on chosen league/season), Main Position (from Main Position), Position Group benchmark.
+# - Compare modes: Compare players OR Same player across seasons
+# - Metrics: Manual or Profile presets (src/profiles.py)
+# - Tables: Raw values (rounded 2), Percentiles (0–100)
+# - Radar (percentiles) with profile name in title
+# - ✅ Z-score stripplot with rich hover on selected diamonds (player/team/season/league/minutes/age/raw/z)
 
 import re
 import io
@@ -153,8 +154,7 @@ def compute_percentiles(cohort: pd.DataFrame, players: pd.DataFrame, metrics: li
     for m in metrics:
         if m not in cohort.columns:
             continue
-        s = to_num(cohort[m])
-        s = s.dropna()
+        s = to_num(cohort[m]).dropna()
         if len(s) < 10:
             continue
         cohort_vals_sorted = np.sort(s.values)
@@ -199,6 +199,7 @@ def radar_percentiles(pct_df: pd.DataFrame, title: str, color_map: dict[str, str
         polar=dict(radialaxis=dict(visible=True, range=[0, 100])),
         height=520,
         margin=dict(l=30, r=30, t=60, b=30),
+        legend=dict(orientation="v"),
     )
     return fig
 
@@ -213,7 +214,7 @@ def zscore_stripplot(
 ) -> go.Figure:
     """
     Grey dots = cohort z distribution; diamonds = selected players (labeled index).
-    Hover on diamonds shows team/season/league/minutes/age + raw value + z-score.
+    Hover on diamonds shows player/team/season/league/minutes/age/raw/z.
     Right = better (inverts lower-better metrics).
     """
     usable = []
@@ -228,7 +229,7 @@ def zscore_stripplot(
         fig.update_layout(title="No usable metrics for z-score plot.")
         return fig
 
-    # Precompute cohort stats + z distributions
+    # Cohort stats per metric
     mu_map, sd_map, z_cohort = {}, {}, {}
     for m in usable:
         s = to_num(cohort_df[m])
@@ -249,7 +250,7 @@ def zscore_stripplot(
         rows=len(usable),
         cols=1,
         shared_xaxes=True,
-        vertical_spacing=0.02,
+        vertical_spacing=0.06,
         subplot_titles=usable,
     )
 
@@ -258,24 +259,24 @@ def zscore_stripplot(
         if len(zvals) == 0:
             continue
 
-        # cohort distribution dots (no player identity, just distribution)
+        # Cohort distribution dots (hover just shows z)
         fig.add_trace(
             go.Scatter(
                 x=zvals,
                 y=np.zeros(len(zvals)),
                 mode="markers",
                 marker=dict(size=6, color="rgba(140,140,140,0.45)"),
-                hovertemplate=f"{m}<br>z=%{{x:.2f}}<extra></extra>",
+                hovertemplate=str(m) + "<br>z=%{x:.2f}<extra></extra>",
                 showlegend=False,
             ),
             row=i,
             col=1,
         )
 
-        # mean line at 0
+        # Avg line
         fig.add_vline(x=0, line_width=1, line_dash="dash", line_color="rgba(80,80,80,0.65)", row=i, col=1)
 
-        # selected players (diamonds)
+        # Selected diamonds with rich hover
         for label, row in players_df_labeled.iterrows():
             raw_val = to_num(pd.Series([row.get(m, np.nan)])).iloc[0]
             if pd.isna(raw_val) or not np.isfinite(sd_map[m]):
@@ -298,9 +299,9 @@ def zscore_stripplot(
                     x=[z],
                     y=[0],
                     mode="markers+text",
-                    marker=dict(size=10, symbol="diamond", color=color_map.get(label, "#1f77b4")),
                     text=[label],
                     textposition="top center",
+                    marker=dict(size=10, symbol="diamond", color=color_map.get(label, "#1f77b4")),
                     customdata=custom,
                     hovertemplate=(
                         "<b>%{text}</b><br>"
@@ -309,7 +310,7 @@ def zscore_stripplot(
                         "League: %{customdata[0][2]}<br>"
                         "Minutes: %{customdata[0][3]}<br>"
                         "Age: %{customdata[0][4]}<br>"
-                        f"{m}: %{customdata[0][5]:.2f}<br>"
+                        + str(m) + ": %{customdata[0][5]:.2f}<br>"
                         "Z: %{x:.2f}"
                         "<extra></extra>"
                     ),
@@ -325,7 +326,7 @@ def zscore_stripplot(
     fig.update_xaxes(title_text="Z-score (0 = cohort average)", row=len(usable), col=1)
     fig.update_layout(
         title=title,
-        height=max(420, 120 * len(usable)),
+        height=max(420, 150 * len(usable)),
         margin=dict(l=20, r=20, t=70, b=40),
     )
     fig.add_annotation(x=-2.5, y=1.0, xref="x", yref="paper", text="Worse", showarrow=False, opacity=0.55)
@@ -336,11 +337,13 @@ def zscore_stripplot(
 # Build Season + Position Group
 # -----------------------------
 df2 = df.copy()
+
 if "Season" not in df2.columns:
     df2["Season"] = df2[LEAGUE_COL].apply(extract_season_from_text)
 
 df2["Season"] = df2["Season"].astype(str).str.strip()
 df2.loc[df2["Season"].str.lower().isin(["nan", "none", ""]), "Season"] = np.nan
+
 df2["Position Group"] = df2[POS_COL].apply(position_group)
 
 numeric_cols = safe_metric_list(df2)
@@ -349,7 +352,7 @@ if not numeric_cols:
     st.stop()
 
 # -----------------------------
-# Sidebar: Cohort Filters (League -> Team dependent) + Age slicer
+# Sidebar filters (with Age slider below minutes)
 # -----------------------------
 with st.sidebar:
     st.header("Player Filters")
@@ -359,7 +362,6 @@ with st.sidebar:
         "Season(s)",
         options=seasons_all,
         default=seasons_all[:1] if seasons_all else [],
-        help="Select one or multiple seasons (e.g., 24/25 and 25/26, or 2024 and 2025).",
     )
 
     df_f = df2.copy()
@@ -371,18 +373,24 @@ with st.sidebar:
         "League(s)",
         options=leagues_all,
         default=leagues_all[:1] if leagues_all else [],
-        help="Leagues available in selected seasons.",
     )
     if leagues_selected:
         df_f = df_f[df_f[LEAGUE_COL].astype(str).isin([str(l) for l in leagues_selected])]
 
-    # Minutes
+    # minutes
     df_f["Minutes played"] = to_num(df_f["Minutes played"]).fillna(0)
     max_mins = int(df_f["Minutes played"].max()) if not df_f.empty else 0
-    min_minutes = st.slider("Minimum minutes", 0, max(200, max_mins), min(600, max_mins) if max_mins else 0, step=50)
+    min_minutes = st.slider(
+        "Minimum minutes",
+        0,
+        max(200, max_mins),
+        min(600, max_mins) if max_mins else 0,
+        step=50
+    )
     df_f = df_f[df_f["Minutes played"] >= min_minutes]
 
-    # ✅ Age slicer (below minutes)
+    # ✅ Age range below minutes
+    age_range = None
     if "Age" in df_f.columns:
         df_f["Age"] = to_num(df_f["Age"])
         age_vals = df_f["Age"].dropna()
@@ -405,6 +413,7 @@ with st.sidebar:
         df_f = df_f[df_f[POS_COL].astype(str) == str(pos_selected)]
 
     # Position Group benchmark
+    df_f["Position Group"] = df_f[POS_COL].apply(position_group)
     pos_group_all = unique_sorted(df_f["Position Group"])
     pos_group_selected = st.selectbox("Position Group (benchmark)", ["All"] + pos_group_all, index=0)
     if pos_group_selected != "All":
@@ -419,7 +428,7 @@ season_label = " / ".join(seasons_selected) if seasons_selected else "All season
 bench_label = f"{pos_group_selected if pos_group_selected != 'All' else 'All positions'} | {league_label} | {season_label}"
 
 # -----------------------------
-# Compare Mode + slots + colors
+# Selection
 # -----------------------------
 st.markdown("### Selection")
 
@@ -447,7 +456,6 @@ if mode == "Compare players":
         "Players to compare",
         options=players_available,
         default=players_available[: int(n_slots)] if len(players_available) >= int(n_slots) else players_available,
-        help="Pick players from the filtered cohort.",
     )
     selected_players = selected_players[: int(n_slots)]
 
@@ -457,6 +465,7 @@ if mode == "Compare players":
 
     tmp = df_f.copy()
     tmp["_minutes"] = to_num(tmp["Minutes played"]).fillna(0)
+
     chosen = (
         tmp[tmp["Player"].isin(selected_players)]
         .sort_values(["Player", "_minutes"], ascending=[True, False])
@@ -466,7 +475,8 @@ if mode == "Compare players":
     )
 
     chosen["Label"] = chosen.apply(
-        lambda r: f"{r['Player']} ({r['Season']})" if pd.notna(r.get("Season")) else str(r["Player"]), axis=1
+        lambda r: f"{r['Player']} ({r['Season']})" if pd.notna(r.get("Season")) else str(r["Player"]),
+        axis=1
     )
     selected_rows_labeled = chosen.set_index("Label")
     labels = selected_rows_labeled.index.tolist()
@@ -474,7 +484,6 @@ if mode == "Compare players":
 else:
     p = st.selectbox("Player", options=players_available)
     seasons_for_player = unique_sorted(df_f[df_f["Player"].astype(str) == str(p)]["Season"])
-
     if len(seasons_for_player) < 2:
         st.info("This player has fewer than 2 seasons in the current cohort filters. Expand Season/League.")
         st.stop()
@@ -483,12 +492,11 @@ else:
         "Select seasons for this player",
         options=seasons_for_player,
         default=seasons_for_player[:2],
-        help="Pick at least 2 seasons to compare for the same player.",
     )
     seasons_pick = seasons_pick[: int(n_slots)]
 
     if len(seasons_pick) < 2:
-        st.info("Select at least 2 seasons for this player.")
+        st.info("Select at least 2 seasons.")
         st.stop()
 
     tmp = df_f[(df_f["Player"].astype(str) == str(p)) & (df_f["Season"].astype(str).isin([str(s) for s in seasons_pick]))].copy()
@@ -511,7 +519,7 @@ if len(labels) < 2:
 color_map = {labels[i]: color_picks[i % len(color_picks)] for i in range(len(labels))}
 
 # -----------------------------
-# Metrics: Profile + manual
+# Metrics
 # -----------------------------
 st.markdown("### Metrics")
 
@@ -522,7 +530,11 @@ if "compare_profile" not in st.session_state:
 if "compare_metrics" not in st.session_state:
     st.session_state["compare_metrics"] = []
 
-profile_choice = st.selectbox("Metric profile (optional)", profile_names, index=profile_names.index(st.session_state["compare_profile"]) if st.session_state["compare_profile"] in profile_names else 0)
+profile_choice = st.selectbox(
+    "Metric profile (optional)",
+    profile_names,
+    index=profile_names.index(st.session_state["compare_profile"]) if st.session_state["compare_profile"] in profile_names else 0
+)
 
 if profile_choice != st.session_state["compare_profile"]:
     st.session_state["compare_profile"] = profile_choice
@@ -537,10 +549,10 @@ selected_metrics = st.multiselect(
 st.session_state["compare_metrics"] = selected_metrics
 
 if len(selected_metrics) < 3:
-    st.info("Select at least 3 metrics (radar + z-score plot becomes meaningful).")
+    st.info("Select at least 3 metrics (radar + z-scores becomes meaningful).")
     st.stop()
 
-# Ensure numeric
+# Benchmark cohort
 bench_df = df_f.copy()
 for m in selected_metrics:
     bench_df[m] = to_num(bench_df[m])
@@ -609,143 +621,19 @@ fig_radar = radar_percentiles(pct_tbl.fillna(0.0), radar_title, color_map)
 st.plotly_chart(fig_radar, use_container_width=True)
 
 # -----------------------------
-# Z-score stripplot (with hover info)
+# Z-score stripplot (rich hover)
 # -----------------------------
 st.markdown("### Z-scores (combined subset)")
-def zscore_stripplot(
-    cohort_df,
-    players_df_labeled,
-    metrics,
-    title="Z-scores",
-    color_map=None,
-    team_col="Team",
-    league_col="League"
-):
-    import numpy as np
-    import plotly.graph_objects as go
-    from plotly.subplots import make_subplots
-
-    if not metrics:
-        return go.Figure()
-
-    # Keep only numeric metrics that exist
-    metrics = [
-        m for m in metrics
-        if m in cohort_df.columns and pd.api.types.is_numeric_dtype(cohort_df[m])
-    ]
-
-    if not metrics:
-        return go.Figure()
-
-    fig = make_subplots(
-        rows=len(metrics),
-        cols=1,
-        shared_xaxes=True,
-        vertical_spacing=0.08
-    )
-
-    for i, m in enumerate(metrics, start=1):
-
-        # Z-scores for full cohort
-        mean = cohort_df[m].mean()
-        std = cohort_df[m].std(ddof=0)
-
-        if std == 0 or np.isnan(std):
-            continue
-
-        cohort_df[f"z_{m}"] = (cohort_df[m] - mean) / std
-
-        # ---- Grey cohort dots ----
-        fig.add_trace(
-            go.Scatter(
-                x=cohort_df[f"z_{m}"],
-                y=[0] * len(cohort_df),
-                mode="markers",
-                marker=dict(color="lightgrey", size=6),
-                showlegend=False,
-                hoverinfo="skip"
-            ),
-            row=i,
-            col=1
-        )
-
-        # ---- Selected players ----
-        for _, row_player in players_df_labeled.iterrows():
-
-            if m not in row_player:
-                continue
-
-            z_value = (row_player[m] - mean) / std
-
-            player_name = row_player.get("Player", "Player")
-            team_name = row_player.get(team_col, "")
-            league_name = row_player.get(league_col, "")
-            season_name = row_player.get("Season", "")
-            minutes = row_player.get("Minutes played", "")
-            age = row_player.get("Age", "")
-            raw_value = row_player[m]
-
-            color = color_map.get(player_name, "red") if color_map else "red"
-
-            fig.add_trace(
-                go.Scatter(
-                    x=[z_value],
-                    y=[0],
-                    mode="markers+text",
-                    text=[player_name],
-                    textposition="top center",
-                    marker=dict(
-                        size=12,
-                        color=color,
-                        symbol="diamond"
-                    ),
-                    customdata=[[team_name, season_name, league_name, minutes, age, raw_value]],
-                    hovertemplate=(
-                        "<b>%{text}</b><br>"
-                        "Squad: %{customdata[0][0]}<br>"
-                        "Season: %{customdata[0][1]}<br>"
-                        "League: %{customdata[0][2]}<br>"
-                        "Minutes: %{customdata[0][3]}<br>"
-                        "Age: %{customdata[0][4]}<br>"
-                        + m + ": %{customdata[0][5]:.2f}<br>"
-                        "Z: %{x:.2f}"
-                        "<extra></extra>"
-                    ),
-                    showlegend=False
-                ),
-                row=i,
-                col=1
-            )
-
-        # ---- Avg reference line ----
-        fig.add_vline(
-            x=0,
-            line_dash="dash",
-            line_color="black",
-            row=i,
-            col=1
-        )
-
-        fig.update_yaxes(
-            showticklabels=False,
-            row=i,
-            col=1
-        )
-
-        fig.update_xaxes(
-            title_text=m,
-            row=i,
-            col=1
-        )
-
-    fig.update_layout(
-        height=220 * len(metrics),
-        title=title,
-        showlegend=False,
-        template="plotly_white"
-    )
-
-    return fig
+fig_z = zscore_stripplot(
+    cohort_df=bench_df,
+    players_df_labeled=selected_rows_labeled,
+    metrics=selected_metrics,
+    title=f"Z-scores within combined subset ({bench_label})",
+    color_map=color_map,
+    team_col=TEAM_COL,
+    league_col=LEAGUE_COL,
+)
+st.plotly_chart(fig_z, use_container_width=True)
 
 # -----------------------------
 # Export
@@ -768,16 +656,3 @@ html.write("<h3>Percentiles</h3>")
 html.write(pct_tbl.to_html())
 html_bytes = html.getvalue().encode("utf-8")
 st.download_button("Download report tables (HTML)", html_bytes, file_name="compare_report_tables.html", mime="text/html")
-
-with st.expander("Radar PNG export (optional)", expanded=False):
-    try:
-        import plotly.io as pio
-        radar_png = pio.to_image(fig_radar, format="png", width=1000, height=700)
-        st.download_button("Download radar (PNG)", radar_png, file_name="radar.png", mime="image/png")
-        st.success("Radar PNG export ready.")
-    except Exception as e:
-        st.info(
-            "Radar PNG export unavailable. On Streamlit Cloud, add `kaleido==0.2.1.post1` "
-            "to requirements.txt (bundled Chromium)."
-        )
-        st.caption(f"Export debug: {e}")
