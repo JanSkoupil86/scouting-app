@@ -17,13 +17,17 @@ def _first_existing_df_from_session(keys: list[str]) -> pd.DataFrame | None:
     return None
 
 
-def _numeric_metric_candidates(
-    df: pd.DataFrame,
-    exclude_cols: set[str],
-) -> list[str]:
+def _numeric_metric_candidates(df: pd.DataFrame, exclude_cols: set[str]) -> list[str]:
     numeric_cols = [c for c in df.columns if pd.api.types.is_numeric_dtype(df[c])]
     metrics = [c for c in numeric_cols if c not in exclude_cols]
     return sorted(metrics)
+
+
+def _pick_col(df: pd.DataFrame, candidates: list[str]) -> str | None:
+    for c in candidates:
+        if c in df.columns:
+            return c
+    return None
 
 
 # -----------------------------
@@ -32,13 +36,13 @@ def _numeric_metric_candidates(
 def render_player_screening(
     df: pd.DataFrame,
     *,
-    league_col: str = "League",
-    position_col: str = "Specific Position",
-    age_col: str = "Age",
-    minutes_col: str = "Minutes",
-    player_col: str = "Player",
-    team_col: str = "Squad",
-    season_col: str | None = "Season",  # optional
+    league_col: str,
+    position_col: str,
+    age_col: str,
+    minutes_col: str,
+    player_col: str,
+    team_col: str,
+    season_col: str | None = None,  # optional
     exclude_cols: set[str] | None = None,
     default_metrics: list[str] | None = None,
 ):
@@ -74,12 +78,12 @@ def render_player_screening(
     # ---- default metrics
     if default_metrics is None:
         preferred = [
-            "xG p90",
-            "xA p90",
-            "Shots p90",
-            "Key Passes p90",
-            "Progressive Passes p90",
-            "Progressive Carries p90",
+            "xG per 90",
+            "xA per 90",
+            "Shots per 90",
+            "Key passes per 90",
+            "Progressive passes per 90",
+            "Progressive runs per 90",
         ]
         default_metrics = [m for m in preferred if m in metric_candidates][:6]
         if not default_metrics:
@@ -105,7 +109,7 @@ def render_player_screening(
 
     with c2:
         sel_position = st.selectbox(
-            "Specific Position",
+            "Position",
             options=positions,
             index=0 if positions else 0,
             key="ps_position",
@@ -226,7 +230,6 @@ def render_player_screening(
 
     for metric in sel_metrics:
         s = pd.to_numeric(cohort[metric], errors="coerce")
-        # Higher-is-better percentile rank
         pct = s.rank(pct=True, method="average") * 100.0
         pct_df[f"{metric} pctl"] = pct
 
@@ -238,7 +241,6 @@ def render_player_screening(
     for metric in sel_metrics:
         low, high = thresholds[metric]
         pcol = f"{metric} pctl"
-        # Conservative: NaN fails screening
         mask &= pct_df[pcol].between(low, high, inclusive="both") & pct_df[pcol].notna()
 
     screened = cohort.loc[mask].copy()
@@ -286,30 +288,44 @@ def render_player_screening(
 st.set_page_config(page_title="Player Screening", page_icon="🔎", layout="wide")
 st.title("Player Screening")
 
-# Pull the dataset from session_state (shared across pages)
-# Add/rename keys here to match how your app stores df.
-SESSION_DF_KEYS = [
-    "df",
-    "data",
-    "players_df",
-    "dataset",
-    "master_df",
-    "merged_df",
-]
-
+SESSION_DF_KEYS = ["df", "data", "players_df", "dataset", "master_df", "merged_df"]
 df_shared = _first_existing_df_from_session(SESSION_DF_KEYS)
 
 if df_shared is None:
     st.info("No dataset loaded. Go to **Home** and upload/select your data first.")
     st.stop()
 
+# Auto-detect Wyscout-ish columns
+league_col = _pick_col(df_shared, ["League", "Competition", "league"])
+position_col = _pick_col(df_shared, ["Specific Position", "Main Position", "Position"])
+age_col = _pick_col(df_shared, ["Age"])
+minutes_col = _pick_col(df_shared, ["Minutes", "Minutes played", "Min", "minutes_played"])
+player_col = _pick_col(df_shared, ["Player", "Name"]) or "Player"
+team_col = _pick_col(df_shared, ["Squad", "Team", "Club"]) or "Team"
+season_col = _pick_col(df_shared, ["Season"])
+
+missing = []
+if league_col is None:
+    missing.append("League")
+if position_col is None:
+    missing.append("Position")
+if age_col is None:
+    missing.append("Age")
+if minutes_col is None:
+    missing.append("Minutes")
+
+if missing:
+    st.error(f"Cannot find required columns: {missing}")
+    st.write("Available columns:", list(df_shared.columns))
+    st.stop()
+
 render_player_screening(
     df_shared,
-    league_col="League",
-    position_col="Specific Position",
-    age_col="Age",
-    minutes_col="Minutes",
-    player_col="Player",
-    team_col="Squad",
-    season_col="Season",
+    league_col=league_col,
+    position_col=position_col,
+    age_col=age_col,
+    minutes_col=minutes_col,
+    player_col=player_col,
+    team_col=team_col,
+    season_col=season_col,
 )
