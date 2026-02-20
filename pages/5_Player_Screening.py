@@ -1,6 +1,30 @@
+# pages/5_Player_Screening.py
+# -*- coding: utf-8 -*-
+
 import numpy as np
 import pandas as pd
 import streamlit as st
+
+
+# -----------------------------
+# Utilities
+# -----------------------------
+def _first_existing_df_from_session(keys: list[str]) -> pd.DataFrame | None:
+    for k in keys:
+        v = st.session_state.get(k, None)
+        if isinstance(v, pd.DataFrame) and not v.empty:
+            return v
+    return None
+
+
+def _numeric_metric_candidates(
+    df: pd.DataFrame,
+    exclude_cols: set[str],
+) -> list[str]:
+    numeric_cols = [c for c in df.columns if pd.api.types.is_numeric_dtype(df[c])]
+    metrics = [c for c in numeric_cols if c not in exclude_cols]
+    return sorted(metrics)
+
 
 # -----------------------------
 # Player Screening Feature
@@ -18,40 +42,52 @@ def render_player_screening(
     exclude_cols: set[str] | None = None,
     default_metrics: list[str] | None = None,
 ):
-    st.header("Player Screening")
+    st.markdown(
+        "Screen players by requiring percentile ranges for selected metrics.\n\n"
+        "**Percentiles are computed within the selected cohort** "
+        "(League(s) + Position + Age filter + Minutes filter)."
+    )
 
-    # Safety checks
+    # ---- required columns check
     required = [league_col, position_col, age_col, minutes_col]
     missing_required = [c for c in required if c not in df.columns]
     if missing_required:
-        st.error(f"Missing required columns: {missing_required}")
-        return
+        st.error(f"Missing required columns in dataset: {missing_required}")
+        st.stop()
 
+    # ---- exclude cols default
     if exclude_cols is None:
-        exclude_cols = {player_col, team_col, league_col, position_col, age_col, minutes_col}
+        exclude_cols = {league_col, position_col, age_col, minutes_col}
+        if player_col in df.columns:
+            exclude_cols.add(player_col)
+        if team_col in df.columns:
+            exclude_cols.add(team_col)
         if season_col and season_col in df.columns:
             exclude_cols.add(season_col)
 
-    # Identify candidate metric columns (numeric only)
-    numeric_cols = [c for c in df.columns if pd.api.types.is_numeric_dtype(df[c])]
-    metric_candidates = [c for c in numeric_cols if c not in exclude_cols]
-    metric_candidates = sorted(metric_candidates)
-
+    # ---- metric candidates (numeric only)
+    metric_candidates = _numeric_metric_candidates(df, exclude_cols)
     if not metric_candidates:
-        st.warning("No numeric metric columns found for screening.")
-        return
+        st.warning("No numeric metrics available for screening (after exclusions).")
+        st.stop()
 
-    # Defaults
+    # ---- default metrics
     if default_metrics is None:
-        # choose a few common-looking ones if present, else first 5
-        preferred = ["xG p90", "xA p90", "Shots p90", "Key Passes p90", "Progressive Passes p90"]
-        default_metrics = [m for m in preferred if m in metric_candidates][:5]
+        preferred = [
+            "xG p90",
+            "xA p90",
+            "Shots p90",
+            "Key Passes p90",
+            "Progressive Passes p90",
+            "Progressive Carries p90",
+        ]
+        default_metrics = [m for m in preferred if m in metric_candidates][:6]
         if not default_metrics:
-            default_metrics = metric_candidates[:5]
+            default_metrics = metric_candidates[:6]
 
-    # -----------------------------
+    # =========================
     # Filters
-    # -----------------------------
+    # =========================
     st.subheader("Filters")
 
     leagues = sorted([x for x in df[league_col].dropna().unique().tolist()])
@@ -71,13 +107,17 @@ def render_player_screening(
         sel_position = st.selectbox(
             "Specific Position",
             options=positions,
-            index=0 if positions else None,
+            index=0 if positions else 0,
             key="ps_position",
         )
 
-    # Age filter (range)
-    age_min = int(np.nanmin(df[age_col].values)) if df[age_col].notna().any() else 0
-    age_max = int(np.nanmax(df[age_col].values)) if df[age_col].notna().any() else 60
+    # Age slider bounds (robust)
+    age_series = pd.to_numeric(df[age_col], errors="coerce")
+    if age_series.notna().any():
+        age_min = int(np.nanmin(age_series.values))
+        age_max = int(np.nanmax(age_series.values))
+    else:
+        age_min, age_max = 0, 60
 
     with c3:
         age_range = st.slider(
@@ -85,49 +125,60 @@ def render_player_screening(
             min_value=age_min,
             max_value=age_max,
             value=(age_min, age_max),
+            step=1,
             key="ps_age_range",
         )
 
-    # Minutes filter
-    min_min = int(np.nanmin(df[minutes_col].values)) if df[minutes_col].notna().any() else 0
-    min_max = int(np.nanmax(df[minutes_col].values)) if df[minutes_col].notna().any() else 0
+    # Minutes slider bounds (robust)
+    min_series = pd.to_numeric(df[minutes_col], errors="coerce")
+    if min_series.notna().any():
+        min_min = int(np.nanmin(min_series.values))
+        min_max = int(np.nanmax(min_series.values))
+    else:
+        min_min, min_max = 0, 0
 
+    min_minutes_default = 400 if min_max >= 400 else max(0, min_max)
     min_minutes = st.slider(
         "Minimum Minutes",
         min_value=min_min,
         max_value=min_max,
-        value=min(400, min_max) if min_max > 0 else 0,
-        step=10,
+        value=min_minutes_default,
+        step=10 if min_max >= 10 else 1,
         key="ps_min_minutes",
     )
 
-    # Apply base cohort filters
+    # ---- apply base cohort filters
     cohort = df.copy()
 
     if sel_leagues:
         cohort = cohort[cohort[league_col].isin(sel_leagues)]
 
-    if sel_position and sel_position in positions:
+    if sel_position in positions:
         cohort = cohort[cohort[position_col] == sel_position]
 
+    cohort[age_col] = pd.to_numeric(cohort[age_col], errors="coerce")
+    cohort[minutes_col] = pd.to_numeric(cohort[minutes_col], errors="coerce")
+
     cohort = cohort[
-        (cohort[age_col].between(age_range[0], age_range[1], inclusive="both")) &
-        (cohort[minutes_col] >= min_minutes)
+        cohort[age_col].between(age_range[0], age_range[1], inclusive="both")
+        & (cohort[minutes_col] >= float(min_minutes))
     ].copy()
 
     st.caption(
         f"Cohort size: {len(cohort):,} | "
-        f"Leagues: {len(sel_leagues)} | Position: {sel_position} | "
-        f"Age: {age_range[0]}–{age_range[1]} | Minutes ≥ {min_minutes}"
+        f"Leagues: {len(sel_leagues)} | "
+        f"Position: {sel_position} | "
+        f"Age: {age_range[0]}–{age_range[1]} | "
+        f"Minutes ≥ {min_minutes}"
     )
 
     if cohort.empty:
         st.warning("No players in cohort after filters. Adjust filters and try again.")
-        return
+        st.stop()
 
-    # -----------------------------
+    # =========================
     # Metrics & thresholds
-    # -----------------------------
+    # =========================
     st.subheader("Metrics & Screening thresholds")
 
     sel_metrics = st.multiselect(
@@ -139,19 +190,17 @@ def render_player_screening(
 
     if not sel_metrics:
         st.info("Select at least one metric to screen players.")
-        return
+        st.stop()
 
     st.markdown("**Percentile ranges (applied to each metric):**")
 
-    # Percentile thresholds per metric (stable keys)
-    # Store in session_state so removing/re-adding a metric doesn’t wipe its last threshold.
+    # Persist thresholds per metric across reruns
     if "ps_thresholds" not in st.session_state:
         st.session_state.ps_thresholds = {}
 
-    # Default threshold
     DEFAULT_LOW, DEFAULT_HIGH = 30, 100
+    thresholds: dict[str, tuple[int, int]] = {}
 
-    thresholds = {}
     for metric in sel_metrics:
         if metric not in st.session_state.ps_thresholds:
             st.session_state.ps_thresholds[metric] = (DEFAULT_LOW, DEFAULT_HIGH)
@@ -159,61 +208,57 @@ def render_player_screening(
         low0, high0 = st.session_state.ps_thresholds[metric]
 
         low, high = st.slider(
-            label=f"{metric}",
+            metric,
             min_value=0,
             max_value=100,
             value=(int(low0), int(high0)),
             step=1,
-            key=f"ps_thr_{metric}",  # stable per metric
+            key=f"ps_thr__{metric}",  # stable per metric
         )
+
         st.session_state.ps_thresholds[metric] = (low, high)
         thresholds[metric] = (low, high)
 
-    # -----------------------------
+    # =========================
     # Percentile computation (within cohort)
-    # -----------------------------
-    # Using rank(pct=True) is fast, vectorized, and stable.
+    # =========================
     pct_df = pd.DataFrame(index=cohort.index)
 
     for metric in sel_metrics:
-        # Coerce numeric safety
         s = pd.to_numeric(cohort[metric], errors="coerce")
-
-        # Percentile rank; higher value = higher percentile.
-        # If you need "lower is better" metrics, invert here (see note below).
+        # Higher-is-better percentile rank
         pct = s.rank(pct=True, method="average") * 100.0
         pct_df[f"{metric} pctl"] = pct
 
-    # -----------------------------
+    # =========================
     # Apply AND screening across metrics
-    # -----------------------------
+    # =========================
     mask = pd.Series(True, index=cohort.index)
 
     for metric in sel_metrics:
         low, high = thresholds[metric]
         pcol = f"{metric} pctl"
-
         # Conservative: NaN fails screening
         mask &= pct_df[pcol].between(low, high, inclusive="both") & pct_df[pcol].notna()
 
     screened = cohort.loc[mask].copy()
     screened = screened.join(pct_df, how="left")
 
-    # -----------------------------
-    # Output table
-    # -----------------------------
     if screened.empty:
         st.warning("No players met all thresholds. Widen percentile ranges or change metrics.")
-        return
+        st.stop()
 
-    # Build display columns
-    base_cols = [c for c in [player_col, team_col, league_col, position_col, age_col, minutes_col] if c in screened.columns]
+    # =========================
+    # Output table
+    # =========================
+    base_cols = []
+    for c in [player_col, team_col, league_col, position_col, age_col, minutes_col]:
+        if c in screened.columns:
+            base_cols.append(c)
+
     raw_metric_cols = sel_metrics
     pctl_cols = [f"{m} pctl" for m in sel_metrics]
 
-    display_cols = base_cols + raw_metric_cols + pctl_cols
-
-    # Helpful sort: average percentile across selected metrics
     screened["Avg pctl"] = screened[pctl_cols].mean(axis=1)
     display_cols = base_cols + ["Avg pctl"] + raw_metric_cols + pctl_cols
 
@@ -225,7 +270,6 @@ def render_player_screening(
         hide_index=True,
     )
 
-    # Optional: download
     csv = screened[display_cols].to_csv(index=False).encode("utf-8")
     st.download_button(
         "Download screened players (CSV)",
@@ -235,8 +279,37 @@ def render_player_screening(
         key="ps_download_csv",
     )
 
-    # Note for directionality support
-    st.caption(
-        "Note: Percentiles currently assume **higher is better**. "
-        "If you have metrics where **lower is better** (e.g., Fouls, Errors), invert them before ranking."
-    )
+
+# -----------------------------
+# Page entrypoint (CRITICAL)
+# -----------------------------
+st.set_page_config(page_title="Player Screening", page_icon="🔎", layout="wide")
+st.title("Player Screening")
+
+# Pull the dataset from session_state (shared across pages)
+# Add/rename keys here to match how your app stores df.
+SESSION_DF_KEYS = [
+    "df",
+    "data",
+    "players_df",
+    "dataset",
+    "master_df",
+    "merged_df",
+]
+
+df_shared = _first_existing_df_from_session(SESSION_DF_KEYS)
+
+if df_shared is None:
+    st.info("No dataset loaded. Go to **Home** and upload/select your data first.")
+    st.stop()
+
+render_player_screening(
+    df_shared,
+    league_col="League",
+    position_col="Specific Position",
+    age_col="Age",
+    minutes_col="Minutes",
+    player_col="Player",
+    team_col="Squad",
+    season_col="Season",
+)
