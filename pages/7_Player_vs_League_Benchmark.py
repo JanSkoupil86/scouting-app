@@ -109,86 +109,227 @@ def _union_metrics(kpi_map: dict[str, list[str]]) -> list[str]:
     return out
 
 
-def _build_group_spans(radar_metrics: list[str], metric_to_group: dict[str, str]) -> list[dict]:
-    spans = []
-    current_group = None
-    start = 0
-    for i, m in enumerate(radar_metrics):
+def _build_metric_to_group(kpi_map: dict[str, list[str]]) -> dict[str, str]:
+    metric_to_group = {}
+    for kpi, ms in kpi_map.items():
+        for m in ms:
+            if m and m not in metric_to_group:
+                metric_to_group[m] = kpi
+    return metric_to_group
+
+
+def _ordered_groups_for_metrics(radar_metrics: list[str], metric_to_group: dict[str, str]) -> list[str]:
+    order = []
+    seen = set()
+    for m in radar_metrics:
         g = metric_to_group.get(m, None)
-        if current_group is None:
-            current_group = g
-            start = i
-            continue
-        if g != current_group:
-            spans.append({"group": current_group, "start": start, "end": i - 1})
-            current_group = g
-            start = i
-    spans.append({"group": current_group, "start": start, "end": len(radar_metrics) - 1})
-    spans = [s for s in spans if s["group"]]
-    return spans
+        if g and g not in seen:
+            seen.add(g)
+            order.append(g)
+    return order
 
 
-def _angle_for_index(i: float, n: int, rotation_deg: float = 90.0, clockwise: bool = True) -> float:
-    step = 360.0 / float(n) if n else 0.0
-    if clockwise:
-        return rotation_deg - i * step
-    return rotation_deg + i * step
+def _z_to_0_100(z: float, clip: float = 3.0) -> float:
+    """
+    Map z-score to 0..100 via clipping to [-clip,+clip] then linear map.
+    """
+    if not np.isfinite(z):
+        return np.nan
+    zc = float(np.clip(z, -clip, clip))
+    return (zc + clip) / (2.0 * clip) * 100.0
 
 
-def _add_kpi_group_labels_to_radar(
-    fig: go.Figure,
+def _make_contrast_palette(n: int) -> list[str]:
+    """
+    Use Plotly qualitative sets that are high-contrast.
+    """
+    base = (
+        px.colors.qualitative.Bold
+        + px.colors.qualitative.Prism
+        + px.colors.qualitative.Safe
+        + px.colors.qualitative.Vivid
+    )
+    if n <= len(base):
+        return base[:n]
+    # repeat if needed
+    out = []
+    for i in range(n):
+        out.append(base[i % len(base)])
+    return out
+
+
+def _format_value_chip(v: float, scale: str) -> str:
+    if not np.isfinite(v):
+        return "—"
+    if scale == "Percentiles":
+        return f"{v:.0f}"
+    return f"{v:.2f}"
+
+
+# -----------------------------
+# Wedge radar (KPI-colored)
+# -----------------------------
+def make_wedge_radar(
+    radar_df: pd.DataFrame,
     radar_metrics: list[str],
-    spans: list[dict],
     *,
-    rotation_deg: float = 90.0,
-    clockwise: bool = True,
-    label_radius: float = 0.49,
-    center: tuple[float, float] = (0.5, 0.5),
-    show_separators: bool = True,
-):
+    scale: str,
+    show_baseline: bool,
+    baseline_value: float,  # 50 for percentiles, 0 for z
+    metric_to_group: dict[str, str] | None,
+    dark_bg: bool = True,
+) -> go.Figure:
+    """
+    Build a wedge radar using barpolar sectors.
+    - r: player value in 0..100 space (percentiles directly; z mapped to 0..100)
+    - theta: center angle of each sector
+    - width: sector width
+    - color: KPI group
+    """
     n = len(radar_metrics)
-    if n == 0 or not spans:
-        return
+    step = 360.0 / float(n) if n else 0.0
 
-    cx, cy = center
+    # Values in "radial" space (0..100)
+    if scale == "Percentiles":
+        r_vals = radar_df["Percentile"].to_numpy(dtype=float)
+        chip_vals = radar_df["Percentile"].to_numpy(dtype=float)
+        baseline_r = 50.0
+    else:
+        z_vals = radar_df["Z"].to_numpy(dtype=float)
+        r_vals = np.array([_z_to_0_100(z) for z in z_vals], dtype=float)
+        chip_vals = z_vals
+        baseline_r = 50.0  # mapped zero -> 50 in 0..100 space
 
-    if show_separators:
-        boundary_indices = sorted({s["start"] for s in spans} | {s["end"] + 1 for s in spans if s["end"] + 1 < n})
-        for bi in boundary_indices:
-            ang = _angle_for_index(float(bi), n, rotation_deg=rotation_deg, clockwise=clockwise)
-            fig.add_trace(
-                go.Scatterpolar(
-                    r=[0, 100],
-                    theta=[ang, ang],
-                    mode="lines",
-                    line=dict(width=2, dash="dot"),
-                    opacity=0.30,
-                    showlegend=False,
-                    hoverinfo="skip",
+    # Group colors
+    groups = []
+    if metric_to_group:
+        for m in radar_metrics:
+            groups.append(metric_to_group.get(m, "Other"))
+    else:
+        groups = ["Other"] * n
+
+    group_order = []
+    seen = set()
+    for g in groups:
+        if g not in seen:
+            seen.add(g)
+            group_order.append(g)
+
+    palette = _make_contrast_palette(len(group_order))
+    group_color = {g: palette[i] for i, g in enumerate(group_order)}
+    colors = [group_color[g] for g in groups]
+
+    # Angles (center of each wedge). Start at top (90°) and go clockwise.
+    theta = np.array([90.0 - i * step for i in range(n)], dtype=float)
+    width = np.array([step] * n, dtype=float)
+
+    fig = go.Figure()
+
+    # KPI-colored wedges
+    fig.add_trace(
+        go.Barpolar(
+            r=r_vals,
+            theta=theta,
+            width=width,
+            marker=dict(color=colors, line=dict(width=1, color="rgba(0,0,0,0.45)")),
+            opacity=0.90,
+            hovertemplate="%{customdata}<extra></extra>",
+            customdata=[
+                (
+                    f"<b>{m}</b><br>"
+                    f"KPI: {groups[i]}<br>"
+                    f"Player raw: {_format_value_chip(radar_df.loc[i,'Player_raw'], 'Z-scores' if scale=='Z-scores' else 'Percentiles')}<br>"
+                    f"Cohort median: {_format_value_chip(radar_df.loc[i,'Cohort_median'], 'Z-scores' if scale=='Z-scores' else 'Percentiles')}<br>"
+                    f"Percentile: {_format_value_chip(radar_df.loc[i,'Percentile'], 'Percentiles')}<br>"
+                    f"Z-score: {_format_value_chip(radar_df.loc[i,'Z'], 'Z-scores')}"
                 )
+                for i, m in enumerate(radar_metrics)
+            ],
+            showlegend=False,
+        )
+    )
+
+    # Baseline ring (dashed circle) in polar coordinates via scatterpolar
+    if show_baseline:
+        ring_theta = np.linspace(0, 360, 361)
+        ring_r = np.full_like(ring_theta, baseline_r, dtype=float)
+        fig.add_trace(
+            go.Scatterpolar(
+                r=ring_r,
+                theta=ring_theta,
+                mode="lines",
+                line=dict(width=3, dash="dash"),
+                opacity=0.65,
+                name="Cohort baseline",
+                hoverinfo="skip",
             )
+        )
 
-    for s in spans:
-        mid = (s["start"] + s["end"]) / 2.0
-        ang = _angle_for_index(mid, n, rotation_deg=rotation_deg, clockwise=clockwise)
-        ang_rad = np.deg2rad(ang)
-        x = cx + label_radius * np.cos(ang_rad)
-        y = cy + label_radius * np.sin(ang_rad)
+    # Numeric chips near the edge
+    chip_theta = theta
+    chip_r = np.clip(r_vals + 6.0, 0, 100)  # push outward a bit
+    chip_text = [_format_value_chip(chip_vals[i], scale) for i in range(n)]
+    fig.add_trace(
+        go.Scatterpolar(
+            r=chip_r,
+            theta=chip_theta,
+            mode="text",
+            text=chip_text,
+            textfont=dict(size=12, color="white" if dark_bg else "black"),
+            hoverinfo="skip",
+            showlegend=False,
+        )
+    )
 
+    # Axis labels (metrics) – keep readable
+    fig.update_layout(
+        height=820,
+        margin=dict(l=80, r=80, t=100, b=80),
+        polar=dict(
+            bgcolor="rgba(0,0,0,0)" if dark_bg else "white",
+            radialaxis=dict(
+                visible=True,
+                range=[0, 100],
+                tickmode="array",
+                tickvals=[0, 25, 50, 75, 100],
+                tickfont=dict(size=11, color="rgba(255,255,255,0.80)" if dark_bg else "rgba(0,0,0,0.70)"),
+                gridcolor="rgba(255,255,255,0.12)" if dark_bg else "rgba(0,0,0,0.12)",
+                linecolor="rgba(255,255,255,0.25)" if dark_bg else "rgba(0,0,0,0.25)",
+                showline=True,
+            ),
+            angularaxis=dict(
+                tickmode="array",
+                tickvals=theta.tolist(),
+                ticktext=radar_metrics,
+                tickfont=dict(size=12, color="rgba(255,255,255,0.85)" if dark_bg else "rgba(0,0,0,0.80)"),
+                gridcolor="rgba(255,255,255,0.10)" if dark_bg else "rgba(0,0,0,0.10)",
+                linecolor="rgba(255,255,255,0.15)" if dark_bg else "rgba(0,0,0,0.15)",
+                rotation=90,
+                direction="clockwise",
+            ),
+        ),
+        paper_bgcolor="rgb(18, 8, 38)" if dark_bg else "white",
+        plot_bgcolor="rgb(18, 8, 38)" if dark_bg else "white",
+    )
+
+    # Legend-style KPI color labels (fake legend using annotations)
+    # (Plotly's legend is not great for barpolar categorical coloring per wedge.)
+    y0 = 0.02
+    x = 0.02
+    for g in group_order:
         fig.add_annotation(
             x=x,
-            y=y,
+            y=y0,
             xref="paper",
             yref="paper",
-            text=f"<b>{s['group']}</b>",
+            text=f"<span style='color:{group_color[g]};font-size:16px'>■</span> <b>{g}</b>",
             showarrow=False,
-            font=dict(size=13),
-            align="center",
-            bgcolor="rgba(255,255,255,0.75)",
-            bordercolor="rgba(0,0,0,0.10)",
-            borderwidth=1,
-            borderpad=4,
+            font=dict(size=12, color="rgba(255,255,255,0.90)" if dark_bg else "rgba(0,0,0,0.80)"),
+            align="left",
         )
+        x += 0.22  # spacing; fine for up to ~4 groups; will wrap imperfectly if many
+
+    return fig
 
 
 # -----------------------------
@@ -385,7 +526,6 @@ def render_benchmark_page(
     if "pb_kpi_overrides" not in st.session_state:
         st.session_state.pb_kpi_overrides = {}
 
-    # reset each run; set later if KPI mode active
     st.session_state["pb_active_kpi_map"] = None
     st.session_state["pb_kpi_union"] = None
 
@@ -466,17 +606,12 @@ def render_benchmark_page(
         template_union = _union_metrics(kpi_map_effective)
 
         st.session_state["pb_active_kpi_map"] = kpi_map_effective
-        st.session_state["pb_kpi_union"] = template_union[:]  # ✅ used by Apply button later
+        st.session_state["pb_kpi_union"] = template_union[:]
 
-        # Table metrics follow KPI union by default
         sel_metrics = template_union[:] if template_union else default_manual
 
-        with st.expander("Show KPI → metrics mapping", expanded=False):
-            for kpi, ms in kpi_map_effective.items():
-                st.write(f"**{kpi}**: {', '.join(ms) if ms else '—'}")
-
     # -----------------------------
-    # Directions store (table + radar)
+    # Directions store
     # -----------------------------
     if "pb_directions" not in st.session_state:
         st.session_state.pb_directions = {}
@@ -485,25 +620,11 @@ def render_benchmark_page(
         if m not in st.session_state.pb_directions:
             st.session_state.pb_directions[m] = _default_direction_for_metric(m)
 
-    with st.expander("Metric direction (higher/lower is better) — for table metrics", expanded=False):
-        cols = st.columns(2)
-        for i, m in enumerate(sel_metrics):
-            with cols[i % 2]:
-                choice = st.radio(
-                    m,
-                    options=["Higher is better", "Lower is better"],
-                    index=0 if st.session_state.pb_directions[m] == "higher" else 1,
-                    key=f"pb_dir__table__{m}",
-                    horizontal=True,
-                )
-                st.session_state.pb_directions[m] = "higher" if choice == "Higher is better" else "lower"
-
-    directions_table = {m: st.session_state.pb_directions[m] for m in sel_metrics}
-
     # -----------------------------
-    # Compute benchmark table
+    # Benchmark table
     # -----------------------------
     rows = []
+    directions_table = {m: st.session_state.pb_directions[m] for m in sel_metrics}
     for m in sel_metrics:
         cohort_s = _safe_num(cohort[m])
         player_val = _safe_num(pd.Series([base.get(m, np.nan)])).iloc[0]
@@ -524,118 +645,91 @@ def render_benchmark_page(
         else:
             pctl = np.nan
 
-        delta_vs_median = float(player_val - cohort_median) if np.isfinite(player_val) and np.isfinite(cohort_median) else np.nan
-        delta_vs_mean = float(player_val - cohort_mean) if np.isfinite(player_val) and np.isfinite(cohort_mean) else np.nan
-
         rows.append(
             {
                 "Metric": m,
-                "Direction": "Higher" if directions_table.get(m, "higher") == "higher" else "Lower",
                 "Player": player_val,
                 "Cohort median": cohort_median,
-                "Cohort mean": cohort_mean,
-                "Δ vs median": delta_vs_median,
-                "Δ vs mean": delta_vs_mean,
-                "Z (better+)": z_better,
                 "Percentile (better+)": pctl,
+                "Z (better+)": z_better,
             }
         )
 
     bench = pd.DataFrame(rows)
-    for c in ["Player", "Cohort median", "Cohort mean", "Δ vs median", "Δ vs mean", "Z (better+)", "Percentile (better+)"]:
-        bench[c] = pd.to_numeric(bench[c], errors="coerce")
-
-    bench["Percentile (better+)"] = bench["Percentile (better+)"].round(0)
-    bench["Z (better+)"] = bench["Z (better+)"].round(2)
-    for c in ["Player", "Cohort median", "Cohort mean", "Δ vs median", "Δ vs mean"]:
-        bench[c] = bench[c].round(2)
-
     st.subheader("Benchmark table")
-    st.dataframe(bench, use_container_width=True, hide_index=True)
-
-    csv = bench.to_csv(index=False).encode("utf-8")
-    st.download_button(
-        "Download benchmark table (CSV)",
-        data=csv,
-        file_name="player_benchmark.csv",
-        mime="text/csv",
-        key="pb_download_csv",
+    st.dataframe(
+        bench.assign(
+            **{
+                "Player": pd.to_numeric(bench["Player"], errors="coerce").round(2),
+                "Cohort median": pd.to_numeric(bench["Cohort median"], errors="coerce").round(2),
+                "Percentile (better+)": pd.to_numeric(bench["Percentile (better+)"], errors="coerce").round(0),
+                "Z (better+)": pd.to_numeric(bench["Z (better+)"], errors="coerce").round(2),
+            }
+        ),
+        use_container_width=True,
+        hide_index=True,
     )
 
     # -----------------------------
-    # Radar: direct comparison + KPI group labels + APPLY BUTTON
+    # Radar
     # -----------------------------
     st.subheader("Radar (direct comparison)")
 
-    radar_scale = st.radio(
-        "Radar scale",
-        options=["Percentiles", "Z-scores"],
-        index=0,
-        horizontal=True,
-        key="pb_radar_scale",
-    )
-    show_baseline = st.checkbox("Show cohort baseline", value=True, key="pb_radar_baseline")
+    cTop1, cTop2, cTop3 = st.columns([1.3, 1.1, 1.3])
+    with cTop1:
+        radar_scale = st.radio("Radar scale", ["Percentiles", "Z-scores"], index=0, horizontal=True, key="pb_radar_scale")
+    with cTop2:
+        radar_style = st.radio("Radar style", ["Polygon", "Wedge (KPI colored)"], index=1, horizontal=True, key="pb_radar_style")
+    with cTop3:
+        show_baseline = st.checkbox("Show cohort baseline", value=True, key="pb_radar_baseline")
 
-    cR1, cR2, cR3, cR4 = st.columns([1.4, 1.2, 1.6, 1.2])
-    with cR1:
-        show_kpi_labels = st.checkbox("Show KPI group labels", value=True, key="pb_radar_kpi_labels")
-    with cR2:
-        show_kpi_separators = st.checkbox("Show KPI separators", value=True, key="pb_radar_kpi_seps")
-    with cR3:
-        kpi_label_radius = st.slider("KPI label distance", 0.42, 0.60, 0.49, 0.01, key="pb_radar_kpi_label_radius")
-    with cR4:
+    cBtn1, cBtn2 = st.columns([1.2, 3.0])
+    with cBtn1:
         apply_btn = st.button("Apply Role KPIs → Radar", use_container_width=True, key="pb_apply_kpi_to_radar")
 
-    # ✅ Apply button behavior (one-click fill and rerun)
     if apply_btn:
         kpi_union = st.session_state.get("pb_kpi_union", None)
         if kpi_union:
-            st.session_state["pb_radar_metrics"] = [m for m in kpi_union if m in metric_set][:12]
+            st.session_state["pb_radar_metrics"] = [m for m in kpi_union if m in metric_set][:14]
             st.rerun()
         else:
-            st.warning("No KPI template metrics available to apply. Switch to KPI mode and assign metrics first.")
+            st.warning("No KPI template metrics available to apply. Use KPI mode and assign metrics first.")
 
-    # Default radar metrics:
     radar_default = st.session_state.get("pb_radar_metrics", None)
     if not radar_default:
-        # If KPI mode active, auto-fallback to KPI union; else fallback to table metrics
         radar_default = st.session_state.get("pb_kpi_union", None) or sel_metrics[:]
-    radar_default = [m for m in radar_default if m in metric_set][:12]
+    radar_default = [m for m in radar_default if m in metric_set][:14]
 
     radar_metrics = st.multiselect(
-        "Radar metrics (any numeric metric)",
+        "Radar metrics",
         options=metric_candidates,
         default=radar_default,
         key="pb_radar_metrics",
     )
 
-    # If user left it empty, and KPI union exists, auto fill once (no button needed)
     if not radar_metrics:
         auto = st.session_state.get("pb_kpi_union", None)
         if auto:
-            st.session_state["pb_radar_metrics"] = [m for m in auto if m in metric_set][:12]
+            st.session_state["pb_radar_metrics"] = [m for m in auto if m in metric_set][:14]
             st.rerun()
         st.info("Select at least one radar metric.")
         return
 
+    # Ensure directions for radar metrics
     for m in radar_metrics:
         if m not in st.session_state.pb_directions:
             st.session_state.pb_directions[m] = _default_direction_for_metric(m)
     radar_directions = {m: st.session_state.pb_directions[m] for m in radar_metrics}
 
+    # Build radar_df (raw, cohort median, percentile, z)
     radar_rows = []
     for m in radar_metrics:
         cohort_s_raw = _safe_num(cohort[m]).dropna()
         player_raw = _safe_num(pd.Series([base.get(m, np.nan)])).iloc[0]
 
-        if cohort_s_raw.empty or not np.isfinite(player_raw):
-            cohort_median = np.nan
-            cohort_mean = np.nan
-            cohort_std = np.nan
-        else:
-            cohort_median = float(np.nanmedian(cohort_s_raw.values))
-            cohort_mean = float(np.nanmean(cohort_s_raw.values))
-            cohort_std = float(np.nanstd(cohort_s_raw.values, ddof=0))
+        cohort_median = float(np.nanmedian(cohort_s_raw.values)) if (not cohort_s_raw.empty) else np.nan
+        cohort_mean = float(np.nanmean(cohort_s_raw.values)) if (not cohort_s_raw.empty) else np.nan
+        cohort_std = float(np.nanstd(cohort_s_raw.values, ddof=0)) if (not cohort_s_raw.empty) else np.nan
 
         adj = -1.0 if radar_directions.get(m, "higher") == "lower" else 1.0
         cohort_adj = cohort_s_raw * adj
@@ -661,128 +755,78 @@ def render_benchmark_page(
 
     radar_df = pd.DataFrame(radar_rows)
 
-    if radar_scale == "Percentiles":
-        player_r = radar_df["Percentile"].tolist()
-        baseline_r = [50.0] * len(radar_metrics)
-        r_range = [0, 100]
-        hover_r_label = "Percentile"
+    # KPI grouping for coloring
+    active_kpi_map = st.session_state.get("pb_active_kpi_map", None)
+    metric_to_group = _build_metric_to_group(active_kpi_map) if isinstance(active_kpi_map, dict) else None
+
+    if radar_style == "Wedge (KPI colored)":
+        fig = make_wedge_radar(
+            radar_df=radar_df,
+            radar_metrics=radar_metrics,
+            scale=radar_scale,
+            show_baseline=show_baseline,
+            baseline_value=50.0 if radar_scale == "Percentiles" else 0.0,
+            metric_to_group=metric_to_group,
+            dark_bg=True,
+        )
+        st.plotly_chart(fig, use_container_width=True)
+
     else:
-        player_r = radar_df["Z"].tolist()
-        baseline_r = [0.0] * len(radar_metrics)
-        max_abs = np.nanmax(np.abs(radar_df["Z"].values)) if radar_df["Z"].notna().any() else 2.0
-        max_abs = float(np.clip(max_abs, 1.5, 4.0))
-        r_range = [-max_abs, max_abs]
-        hover_r_label = "Z-score"
+        # fallback polygon radar (your existing style)
+        if radar_scale == "Percentiles":
+            player_r = radar_df["Percentile"].tolist()
+            baseline_r = [50.0] * len(radar_metrics)
+            r_range = [0, 100]
+            hover_r_label = "Percentile"
+        else:
+            player_r = radar_df["Z"].tolist()
+            baseline_r = [0.0] * len(radar_metrics)
+            max_abs = np.nanmax(np.abs(radar_df["Z"].values)) if radar_df["Z"].notna().any() else 2.0
+            max_abs = float(np.clip(max_abs, 1.5, 4.0))
+            r_range = [-max_abs, max_abs]
+            hover_r_label = "Z-score"
 
-    categories = radar_metrics[:]
-    categories_closed = categories + [categories[0]]
-    player_closed = player_r + [player_r[0]]
-    baseline_closed = baseline_r + [baseline_r[0]]
+        categories = radar_metrics[:]
+        categories_closed = categories + [categories[0]]
+        player_closed = player_r + [player_r[0]]
+        baseline_closed = baseline_r + [baseline_r[0]]
 
-    hover_text = []
-    for _, r in radar_df.iterrows():
-        p_raw = f"{r['Player_raw']:.2f}" if np.isfinite(r["Player_raw"]) else "—"
-        c_med = f"{r['Cohort_median']:.2f}" if np.isfinite(r["Cohort_median"]) else "—"
-        pctl_txt = f"{r['Percentile']:.0f}" if np.isfinite(r["Percentile"]) else "—"
-        z_txt = f"{r['Z']:.2f}" if np.isfinite(r["Z"]) else "—"
-        hover_text.append(
-            f"Player: {p_raw}<br>"
-            f"Cohort median: {c_med}<br>"
-            f"Percentile: {pctl_txt}<br>"
-            f"Z-score: {z_txt}"
-        )
-    hover_text_closed = hover_text + [hover_text[0]]
-
-    fig = go.Figure()
-
-    fig.add_trace(
-        go.Scatterpolar(
-            r=player_closed,
-            theta=categories_closed,
-            mode="lines",
-            fill="toself",
-            fillcolor=px.colors.qualitative.Bold[0],
-            line=dict(color=px.colors.qualitative.Bold[0], width=3),
-            opacity=0.35,
-            name="Player",
-            text=hover_text_closed,
-            hovertemplate="%{theta}<br>" + hover_r_label + ": %{r}<br>%{text}<extra></extra>",
-        )
-    )
-
-    if show_baseline:
+        fig = go.Figure()
         fig.add_trace(
             go.Scatterpolar(
-                r=baseline_closed,
+                r=player_closed,
                 theta=categories_closed,
                 mode="lines",
-                fill="none",
-                line=dict(color=px.colors.qualitative.Bold[1], width=3, dash="dash"),
-                name="Cohort baseline",
-                hovertemplate="%{theta}<br>Baseline: %{r}<extra></extra>",
+                fill="toself",
+                opacity=0.35,
+                name="Player",
+                hovertemplate="%{theta}<br>" + hover_r_label + ": %{r}<extra></extra>",
             )
         )
-
-    ROTATION = 90
-    CLOCKWISE = True
-
-    fig.update_layout(
-        height=780,
-        margin=dict(l=90, r=90, t=120, b=120),
-        showlegend=True,
-        legend=dict(orientation="h", yanchor="bottom", y=1.12, xanchor="left", x=0),
-        polar=dict(
-            bgcolor="white",
-            radialaxis=dict(
-                visible=True,
-                range=r_range,
-                ticks="",
-                showline=True,
-                linewidth=2,
-                linecolor="rgba(0,0,0,0.40)",
-                gridcolor="rgba(0,0,0,0.18)",
-                tickfont=dict(size=11),
-            ),
-            angularaxis=dict(
-                rotation=ROTATION,
-                direction="clockwise" if CLOCKWISE else "counterclockwise",
-                showline=True,
-                linewidth=1,
-                linecolor="rgba(0,0,0,0.18)",
-                gridcolor="rgba(0,0,0,0.15)",
-                tickfont=dict(size=13),
-            ),
-        ),
-    )
-
-    active_kpi_map = st.session_state.get("pb_active_kpi_map", None)
-    if show_kpi_labels and isinstance(active_kpi_map, dict) and active_kpi_map:
-        metric_to_group = {}
-        for kpi, ms in active_kpi_map.items():
-            for m in ms:
-                if m and m not in metric_to_group:
-                    metric_to_group[m] = kpi
-        spans = _build_group_spans(radar_metrics, metric_to_group)
-        if spans:
-            _add_kpi_group_labels_to_radar(
-                fig,
-                radar_metrics=radar_metrics,
-                spans=spans,
-                rotation_deg=float(ROTATION),
-                clockwise=bool(CLOCKWISE),
-                label_radius=float(kpi_label_radius),
-                show_separators=bool(show_kpi_separators),
+        if show_baseline:
+            fig.add_trace(
+                go.Scatterpolar(
+                    r=baseline_closed,
+                    theta=categories_closed,
+                    mode="lines",
+                    fill="none",
+                    line=dict(width=3, dash="dash"),
+                    name="Cohort baseline",
+                    hoverinfo="skip",
+                )
             )
 
-    st.plotly_chart(fig, use_container_width=True)
-
-    with st.expander("Show numeric values (player vs cohort median)", expanded=False):
-        t = radar_df[["Metric", "Player_raw", "Cohort_median", "Percentile", "Z"]].copy()
-        t["Player_raw"] = pd.to_numeric(t["Player_raw"], errors="coerce").round(2)
-        t["Cohort_median"] = pd.to_numeric(t["Cohort_median"], errors="coerce").round(2)
-        t["Percentile"] = pd.to_numeric(t["Percentile"], errors="coerce").round(0)
-        t["Z"] = pd.to_numeric(t["Z"], errors="coerce").round(2)
-        st.dataframe(t, use_container_width=True, hide_index=True)
+        fig.update_layout(
+            height=780,
+            margin=dict(l=90, r=90, t=120, b=120),
+            polar=dict(
+                radialaxis=dict(visible=True, range=r_range),
+                angularaxis=dict(rotation=90, direction="clockwise"),
+            ),
+            showlegend=True,
+            legend=dict(orientation="h", yanchor="bottom", y=1.12, xanchor="left", x=0),
+        )
+        st.plotly_chart(fig, use_container_width=True)
 
 
 # -----------------------------
