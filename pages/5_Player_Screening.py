@@ -30,6 +30,42 @@ def _pick_col(df: pd.DataFrame, candidates: list[str]) -> str | None:
     return None
 
 
+def _default_direction_for_metric(metric_name: str) -> str:
+    """
+    Heuristic: return 'lower' for metrics that are typically "bad when high".
+    You can extend this list anytime.
+    """
+    m = metric_name.strip().lower()
+
+    # "Bad when high" tokens (broad but useful)
+    lower_tokens = [
+        "foul",
+        "yellow",
+        "red",
+        "card",
+        "conceded",
+        "against",
+        "shots against",
+        "xg against",
+        "error",
+        "mistake",
+        "lost",
+        "turnover",
+        "dispossess",
+        "offsides",
+        "offside",
+        "penalty conceded",
+        "goals against",
+    ]
+
+    # If metric contains any token, default to lower-is-better
+    if any(tok in m for tok in lower_tokens):
+        return "lower"
+
+    # Default assumption
+    return "higher"
+
+
 # -----------------------------
 # Player Screening Feature
 # -----------------------------
@@ -99,7 +135,6 @@ def render_player_screening(
     leagues = sorted([x for x in df[league_col].dropna().unique().tolist()])
     positions = sorted([x for x in df[position_col].dropna().unique().tolist()])
 
-    # Cohort toggle: where percentiles are computed
     pct_mode = st.radio(
         "Percentile reference cohort",
         options=["Percentiles vs Selected Positions", "Percentiles vs Whole League"],
@@ -126,7 +161,6 @@ def render_player_screening(
             key="ps_positions",
         )
 
-    # Age slider bounds (robust)
     age_series = pd.to_numeric(df[age_col], errors="coerce")
     if age_series.notna().any():
         age_min = int(np.nanmin(age_series.values))
@@ -144,7 +178,6 @@ def render_player_screening(
             key="ps_age_range",
         )
 
-    # Minutes slider bounds (robust)
     min_series = pd.to_numeric(df[minutes_col], errors="coerce")
     if min_series.notna().any():
         min_min = int(np.nanmin(min_series.values))
@@ -162,7 +195,7 @@ def render_player_screening(
         key="ps_min_minutes",
     )
 
-    # ---- build base cohort: always apply League + Age + Minutes (these define the league cohort)
+    # ---- base cohort: League + Age + Minutes
     base = df.copy()
     if sel_leagues:
         base = base[base[league_col].isin(sel_leagues)]
@@ -179,7 +212,7 @@ def render_player_screening(
         st.warning("No players in cohort after League/Age/Minutes filters. Adjust filters and try again.")
         st.stop()
 
-    # ---- screening cohort: applies positions as well (this is what gets returned)
+    # ---- screening pool: add Positions
     screened_pool = base.copy()
     if sel_positions:
         screened_pool = screened_pool[screened_pool[position_col].isin(sel_positions)].copy()
@@ -188,9 +221,7 @@ def render_player_screening(
         st.warning("No players in cohort after adding Position filter(s). Adjust positions/filters.")
         st.stop()
 
-    # ---- percentile reference cohort:
-    # Option A: Selected Positions => percentiles computed inside screened_pool
-    # Option B: Whole League        => percentiles computed inside base (league cohort)
+    # ---- percentile reference cohort
     if pct_mode == "Percentiles vs Selected Positions":
         pct_ref = screened_pool
         pct_ref_label = "Selected Positions"
@@ -223,9 +254,37 @@ def render_player_screening(
         st.info("Select at least one metric to screen players.")
         st.stop()
 
+    # ---- Direction control (NEW)
+    st.markdown("**Metric direction (higher/lower is better):**")
+
+    if "ps_directions" not in st.session_state:
+        st.session_state.ps_directions = {}
+
+    # Optional: one-click auto-fill for any newly added metrics
+    for m in sel_metrics:
+        if m not in st.session_state.ps_directions:
+            st.session_state.ps_directions[m] = _default_direction_for_metric(m)
+
+    # Compact UI in an expander to avoid clutter
+    with st.expander("Set metric directions", expanded=False):
+        cols = st.columns(2)
+        for i, m in enumerate(sel_metrics):
+            col = cols[i % 2]
+            with col:
+                choice = st.radio(
+                    label=m,
+                    options=["Higher is better", "Lower is better"],
+                    index=0 if st.session_state.ps_directions[m] == "higher" else 1,
+                    key=f"ps_dir__{m}",
+                    horizontal=True,
+                )
+            st.session_state.ps_directions[m] = "higher" if choice == "Higher is better" else "lower"
+
+    directions = {m: st.session_state.ps_directions[m] for m in sel_metrics}
+
+    # ---- Threshold sliders
     st.markdown("**Percentile ranges (applied to each metric):**")
 
-    # Persist thresholds per metric across reruns
     if "ps_thresholds" not in st.session_state:
         st.session_state.ps_thresholds = {}
 
@@ -244,7 +303,7 @@ def render_player_screening(
             max_value=100,
             value=(int(low0), int(high0)),
             step=1,
-            key=f"ps_thr__{metric}",  # stable per metric
+            key=f"ps_thr__{metric}",
         )
 
         st.session_state.ps_thresholds[metric] = (low, high)
@@ -253,10 +312,14 @@ def render_player_screening(
     # =========================
     # Percentiles computed on pct_ref, then applied to screened_pool
     # =========================
-    # Build percentile lookup columns for pct_ref
     pct_cols = {}
     for metric in sel_metrics:
         s = pd.to_numeric(pct_ref[metric], errors="coerce")
+
+        # Direction-aware: invert for lower-is-better
+        if directions.get(metric, "higher") == "lower":
+            s = -s
+
         pct = s.rank(pct=True, method="average") * 100.0
         pct_cols[metric] = pct
 
@@ -265,8 +328,6 @@ def render_player_screening(
         index=pct_ref.index,
     )
 
-    # Map percentiles onto screened_pool (by index)
-    # If your index is not stable/unique, consider adding a unique key column and joining on it.
     screened_pct = screened_pool.join(pct_ref_pct_df, how="left")
 
     # =========================
@@ -277,7 +338,6 @@ def render_player_screening(
     for metric in sel_metrics:
         low, high = thresholds[metric]
         pcol = f"{metric} pctl"
-        # Conservative: NaN fails screening
         mask &= screened_pct[pcol].between(low, high, inclusive="both") & screened_pct[pcol].notna()
 
     result = screened_pct.loc[mask].copy()
