@@ -495,28 +495,30 @@ def render_player_screening(
             x=0,
             font=dict(size=11),
         ),
-        polar=dict(
-            bgcolor="white",
-           radialaxis=dict(
-    visible=True,
-    range=[0, 100],
-    tickmode="array",
-    tickvals=[0, 20, 40, 60, 80, 100],
-    ticks="",
-    showline=True,                 # ✅ draw the outer ring boundary
-    linewidth=2,                   # ✅ make boundary visible
-    linecolor="rgba(0,0,0,0.35)",  # ✅ stronger than grid
-    gridcolor="rgba(0,0,0,0.18)",
-    tickfont=dict(size=11),
+       polar=dict(
+    bgcolor="white",
+    radialaxis=dict(
+        visible=True,
+        range=[0, 100],
+        tickmode="array",
+        tickvals=[0, 20, 40, 60, 80, 100],
+        ticks="",
+        showline=True,                 # outer ring boundary ON
+        linewidth=2,                   # stronger boundary
+        linecolor="rgba(0,0,0,0.40)",  # boundary color
+        gridcolor="rgba(0,0,0,0.18)",  # inner rings
+        tickfont=dict(size=11),
+    ),
+    angularaxis=dict(
+        rotation=90,
+        direction="clockwise",
+        showline=True,                 # spokes outline ON (optional but nice)
+        linewidth=1,
+        linecolor="rgba(0,0,0,0.18)",
+        gridcolor="rgba(0,0,0,0.15)",
+        tickfont=dict(size=13),
+    ),
 ),
-            angularaxis=dict(
-                rotation=90,
-                direction="clockwise",
-                showline=False,
-                gridcolor="rgba(0,0,0,0.15)",
-                tickfont=dict(size=13),
-            ),
-        ),
     )
 
     st.plotly_chart(fig, use_container_width=True)
