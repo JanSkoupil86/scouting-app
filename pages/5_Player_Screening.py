@@ -37,7 +37,6 @@ def _default_direction_for_metric(metric_name: str) -> str:
     Extend this list as your schema grows.
     """
     m = metric_name.strip().lower()
-
     lower_tokens = [
         "foul",
         "yellow",
@@ -65,7 +64,6 @@ def _make_player_key(row: pd.Series, player_col: str, team_col: str, league_col:
     t = str(row.get(team_col, "")).strip()
     l = str(row.get(league_col, "")).strip()
     pos = str(row.get(position_col, "")).strip()
-    # Compact but informative
     return f"{p} — {t} ({l}, {pos})"
 
 
@@ -116,7 +114,7 @@ def render_player_screening(
         st.warning("No numeric metrics available for screening (after exclusions).")
         st.stop()
 
-    # ---- default metrics (tuned to your schema)
+    # ---- default metrics
     if default_metrics is None:
         preferred = [
             "xG per 90",
@@ -354,13 +352,12 @@ def render_player_screening(
 
     st.subheader("Screened players (heatmap percentiles)")
 
-    # Format for display
     disp = result[display_cols].copy()
     for c in pctl_cols + ["Avg pctl"]:
         if c in disp.columns:
             disp[c] = pd.to_numeric(disp[c], errors="coerce").round(0)
 
-    # Pandas Styler heatmap for percentile columns
+    # Heatmap styling via Styler
     styler = disp.style
     heat_cols = [c for c in (["Avg pctl"] + pctl_cols) if c in disp.columns]
     if heat_cols:
@@ -379,21 +376,15 @@ def render_player_screening(
     )
 
     # =========================
-    # Radar comparison (NEW)
+    # Radar comparison (styled like your example)
     # =========================
     st.subheader("Radar comparison (screened players)")
 
-    # Build a stable label for selecting players
     radar_df = result.copy()
     radar_df["_player_key"] = radar_df.apply(
         lambda r: _make_player_key(r, player_col, team_col, league_col, position_col), axis=1
     )
 
-    # Keep only what we need (percentiles)
-    radar_cols = ["_player_key"] + base_cols + ["Avg pctl"] + pctl_cols
-    radar_df = radar_df[radar_cols].copy()
-
-    # Select players
     player_options = radar_df["_player_key"].tolist()
 
     cA, cB = st.columns([2, 1])
@@ -422,12 +413,11 @@ def render_player_screening(
         st.info("Select at least one player to display the radar.")
         return
 
-    # Radar metric selection (defaults to screening metrics)
-    radar_metric_options = sel_metrics[:]  # show raw metric names; we plot their percentile columns
+    radar_metric_options = sel_metrics[:]
     radar_metrics = st.multiselect(
         "Radar metrics",
         options=radar_metric_options,
-        default=radar_metric_options[: min(8, len(radar_metric_options))],
+        default=radar_metric_options[: min(10, len(radar_metric_options))],
         key="ps_radar_metrics",
     )
 
@@ -436,39 +426,59 @@ def render_player_screening(
         return
 
     radar_pctl_cols = [f"{m} pctl" for m in radar_metrics]
-    categories = radar_metrics[:]  # axis labels
 
-    # Build figure
+    # Styled radar: filled polygons + clean grid
     fig = go.Figure()
 
     sub = radar_df[radar_df["_player_key"].isin(selected_players)].copy()
-    # Ensure numeric
     for c in radar_pctl_cols:
         sub[c] = pd.to_numeric(sub[c], errors="coerce")
 
+    categories = radar_metrics[:]
+    categories_closed = categories + [categories[0]]
+
     for _, row in sub.iterrows():
         values = [row.get(f"{m} pctl", np.nan) for m in radar_metrics]
-        # close the loop
         values_closed = values + [values[0]]
-        categories_closed = categories + [categories[0]]
 
         fig.add_trace(
             go.Scatterpolar(
                 r=values_closed,
                 theta=categories_closed,
-                fill="none",
+                mode="lines",          # no markers
+                fill="toself",         # filled area
+                opacity=0.25,          # soft fill
+                line=dict(width=2),    # stronger outline
                 name=row["_player_key"],
                 hovertemplate="%{theta}<br>%{r:.0f} pctl<extra></extra>",
             )
         )
 
     fig.update_layout(
-        polar=dict(
-            radialaxis=dict(visible=True, range=[0, 100]),
-        ),
+        height=700,
+        margin=dict(l=90, r=90, t=30, b=90),
         showlegend=True,
-        height=650,
-        margin=dict(l=30, r=30, t=30, b=30),
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
+        polar=dict(
+            bgcolor="white",
+            radialaxis=dict(
+                visible=True,
+                range=[0, 100],
+                tickmode="array",
+                tickvals=[0, 20, 40, 60, 80, 100],
+                ticks="",
+                showline=False,
+                gridcolor="rgba(0,0,0,0.15)",
+                tickfont=dict(size=11),
+            ),
+            angularaxis=dict(
+                rotation=90,
+                direction="clockwise",
+                showline=False,
+                gridcolor="rgba(0,0,0,0.12)",
+                tickfont=dict(size=12),
+            ),
+        ),
     )
 
     st.plotly_chart(fig, use_container_width=True)
