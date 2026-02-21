@@ -112,7 +112,6 @@ def render_benchmark_page(
     leagues = sorted([x for x in df[league_col].dropna().unique().tolist()])
     positions = sorted([x for x in df[position_col].dropna().unique().tolist()])
 
-    # Quick filter to limit player dropdown size
     c1, c2, c3 = st.columns([2, 2, 2])
     with c1:
         filter_leagues = st.multiselect(
@@ -164,7 +163,6 @@ def render_benchmark_page(
         st.error("Could not find selected player.")
         st.stop()
 
-    # If duplicates exist (same label), take first
     base = base_rows.iloc[0].copy()
 
     st.caption(
@@ -205,7 +203,6 @@ def render_benchmark_page(
             key="pb_bench_positions",
         )
 
-    # Age / minutes cohort filters
     age_all = df[age_col]
     if age_all.notna().any():
         age_min = int(np.nanmin(age_all.values))
@@ -305,7 +302,7 @@ def render_benchmark_page(
         st.info("Select at least one metric.")
         st.stop()
 
-    # Directions
+    # Directions for selected metrics (and later radar metrics)
     if "pb_directions" not in st.session_state:
         st.session_state.pb_directions = {}
     for m in sel_metrics:
@@ -391,7 +388,7 @@ def render_benchmark_page(
     )
 
     # -----------------------------
-    # Radar: direct comparison (Percentiles or Z)
+    # Radar: direct comparison (Percentiles or Z) — radar metrics from ALL dataset metrics
     # -----------------------------
     st.subheader("Radar (direct comparison)")
 
@@ -404,15 +401,23 @@ def render_benchmark_page(
     )
     show_baseline = st.checkbox("Show cohort baseline", value=True, key="pb_radar_baseline")
 
+    # ✅ Now allow radar metrics from ALL numeric metrics
     radar_metrics = st.multiselect(
         "Radar metrics",
-        options=sel_metrics,
+        options=metric_candidates,
         default=sel_metrics[: min(10, len(sel_metrics))],
         key="pb_radar_metrics",
     )
     if not radar_metrics:
         st.info("Select at least one radar metric.")
         return
+
+    # Ensure direction settings exist for radar-only metrics
+    for m in radar_metrics:
+        if m not in st.session_state.pb_directions:
+            st.session_state.pb_directions[m] = _default_direction_for_metric(m)
+
+    radar_directions = {m: st.session_state.pb_directions[m] for m in radar_metrics}
 
     radar_rows = []
     for m in radar_metrics:
@@ -428,7 +433,7 @@ def render_benchmark_page(
             cohort_mean = float(np.nanmean(cohort_s_raw.values))
             cohort_std = float(np.nanstd(cohort_s_raw.values, ddof=0))
 
-        adj = -1.0 if directions.get(m, "higher") == "lower" else 1.0
+        adj = -1.0 if radar_directions.get(m, "higher") == "lower" else 1.0
         cohort_adj = cohort_s_raw * adj
         player_adj = player_raw * adj
 
@@ -438,7 +443,7 @@ def render_benchmark_page(
             pctl = np.nan
 
         z_raw = _zscore(float(player_raw), cohort_mean, cohort_std)
-        z_better = z_raw * (1.0 if directions.get(m, "higher") == "higher" else -1.0)
+        z_better = z_raw * (1.0 if radar_directions.get(m, "higher") == "higher" else -1.0)
 
         radar_rows.append(
             dict(
@@ -472,23 +477,10 @@ def render_benchmark_page(
 
     hover_text = []
     for _, r in radar_df.iterrows():
-        if np.isfinite(r["Player_raw"]):
-            p_raw = f"{r['Player_raw']:.2f}"
-        else:
-            p_raw = "—"
-        if np.isfinite(r["Cohort_median"]):
-            c_med = f"{r['Cohort_median']:.2f}"
-        else:
-            c_med = "—"
-        if np.isfinite(r["Percentile"]):
-            pctl_txt = f"{r['Percentile']:.0f}"
-        else:
-            pctl_txt = "—"
-        if np.isfinite(r["Z"]):
-            z_txt = f"{r['Z']:.2f}"
-        else:
-            z_txt = "—"
-
+        p_raw = f"{r['Player_raw']:.2f}" if np.isfinite(r["Player_raw"]) else "—"
+        c_med = f"{r['Cohort_median']:.2f}" if np.isfinite(r["Cohort_median"]) else "—"
+        pctl_txt = f"{r['Percentile']:.0f}" if np.isfinite(r["Percentile"]) else "—"
+        z_txt = f"{r['Z']:.2f}" if np.isfinite(r["Z"]) else "—"
         hover_text.append(
             f"Player: {p_raw}<br>"
             f"Cohort median: {c_med}<br>"
@@ -499,7 +491,6 @@ def render_benchmark_page(
 
     fig = go.Figure()
 
-    # Player trace
     fig.add_trace(
         go.Scatterpolar(
             r=player_closed,
@@ -511,13 +502,10 @@ def render_benchmark_page(
             opacity=0.35,
             name="Player",
             text=hover_text_closed,
-            hovertemplate="%{theta}<br>"
-            + hover_r_label
-            + ": %{r}<br>%{text}<extra></extra>",
+            hovertemplate="%{theta}<br>" + hover_r_label + ": %{r}<br>%{text}<extra></extra>",
         )
     )
 
-    # Baseline trace (median percentile baseline or z=0 baseline)
     if show_baseline:
         fig.add_trace(
             go.Scatterpolar(
