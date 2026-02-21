@@ -48,8 +48,10 @@ def render_player_screening(
 ):
     st.markdown(
         "Screen players by requiring percentile ranges for selected metrics.\n\n"
-        "**Percentiles are computed within the selected cohort** "
-        "(League(s) + Position + Age filter + Minutes filter)."
+        "**Screening filters**: League(s) + Position(s) + Age + Minutes.\n\n"
+        "**Percentile cohort** can be computed either:\n"
+        "- within the **selected positions** (more role-specific), or\n"
+        "- within the **whole league cohort** (position-agnostic within chosen leagues).\n"
     )
 
     # ---- required columns check
@@ -75,7 +77,7 @@ def render_player_screening(
         st.warning("No numeric metrics available for screening (after exclusions).")
         st.stop()
 
-    # ---- default metrics
+    # ---- default metrics tuned to your dataset column names
     if default_metrics is None:
         preferred = [
             "xG per 90",
@@ -97,6 +99,15 @@ def render_player_screening(
     leagues = sorted([x for x in df[league_col].dropna().unique().tolist()])
     positions = sorted([x for x in df[position_col].dropna().unique().tolist()])
 
+    # Cohort toggle: where percentiles are computed
+    pct_mode = st.radio(
+        "Percentile reference cohort",
+        options=["Percentiles vs Selected Positions", "Percentiles vs Whole League"],
+        index=0,
+        horizontal=True,
+        key="ps_pct_mode",
+    )
+
     c1, c2, c3 = st.columns([2, 2, 2])
 
     with c1:
@@ -108,11 +119,11 @@ def render_player_screening(
         )
 
     with c2:
-        sel_position = st.selectbox(
-            "Position",
+        sel_positions = st.multiselect(
+            "Position(s)",
             options=positions,
-            index=0 if positions else 0,
-            key="ps_position",
+            default=[positions[0]] if positions else [],
+            key="ps_positions",
         )
 
     # Age slider bounds (robust)
@@ -151,34 +162,50 @@ def render_player_screening(
         key="ps_min_minutes",
     )
 
-    # ---- apply base cohort filters
-    cohort = df.copy()
-
+    # ---- build base cohort: always apply League + Age + Minutes (these define the league cohort)
+    base = df.copy()
     if sel_leagues:
-        cohort = cohort[cohort[league_col].isin(sel_leagues)]
+        base = base[base[league_col].isin(sel_leagues)]
 
-    if sel_position in positions:
-        cohort = cohort[cohort[position_col] == sel_position]
+    base[age_col] = pd.to_numeric(base[age_col], errors="coerce")
+    base[minutes_col] = pd.to_numeric(base[minutes_col], errors="coerce")
 
-    cohort[age_col] = pd.to_numeric(cohort[age_col], errors="coerce")
-    cohort[minutes_col] = pd.to_numeric(cohort[minutes_col], errors="coerce")
-
-    cohort = cohort[
-        cohort[age_col].between(age_range[0], age_range[1], inclusive="both")
-        & (cohort[minutes_col] >= float(min_minutes))
+    base = base[
+        base[age_col].between(age_range[0], age_range[1], inclusive="both")
+        & (base[minutes_col] >= float(min_minutes))
     ].copy()
 
+    if base.empty:
+        st.warning("No players in cohort after League/Age/Minutes filters. Adjust filters and try again.")
+        st.stop()
+
+    # ---- screening cohort: applies positions as well (this is what gets returned)
+    screened_pool = base.copy()
+    if sel_positions:
+        screened_pool = screened_pool[screened_pool[position_col].isin(sel_positions)].copy()
+
+    if screened_pool.empty:
+        st.warning("No players in cohort after adding Position filter(s). Adjust positions/filters.")
+        st.stop()
+
+    # ---- percentile reference cohort:
+    # Option A: Selected Positions => percentiles computed inside screened_pool
+    # Option B: Whole League        => percentiles computed inside base (league cohort)
+    if pct_mode == "Percentiles vs Selected Positions":
+        pct_ref = screened_pool
+        pct_ref_label = "Selected Positions"
+    else:
+        pct_ref = base
+        pct_ref_label = "Whole League (selected leagues, age, minutes)"
+
     st.caption(
-        f"Cohort size: {len(cohort):,} | "
+        f"Screening pool size: {len(screened_pool):,} | "
+        f"Percentiles computed vs: {pct_ref_label} | "
         f"Leagues: {len(sel_leagues)} | "
-        f"Position: {sel_position} | "
+        f"Positions: {', '.join(sel_positions) if sel_positions else 'All'} | "
         f"Age: {age_range[0]}–{age_range[1]} | "
         f"Minutes ≥ {min_minutes}"
     )
-
-    if cohort.empty:
-        st.warning("No players in cohort after filters. Adjust filters and try again.")
-        st.stop()
 
     # =========================
     # Metrics & thresholds
@@ -224,29 +251,38 @@ def render_player_screening(
         thresholds[metric] = (low, high)
 
     # =========================
-    # Percentile computation (within cohort)
+    # Percentiles computed on pct_ref, then applied to screened_pool
     # =========================
-    pct_df = pd.DataFrame(index=cohort.index)
-
+    # Build percentile lookup columns for pct_ref
+    pct_cols = {}
     for metric in sel_metrics:
-        s = pd.to_numeric(cohort[metric], errors="coerce")
+        s = pd.to_numeric(pct_ref[metric], errors="coerce")
         pct = s.rank(pct=True, method="average") * 100.0
-        pct_df[f"{metric} pctl"] = pct
+        pct_cols[metric] = pct
+
+    pct_ref_pct_df = pd.DataFrame(
+        {f"{m} pctl": pct_cols[m] for m in sel_metrics},
+        index=pct_ref.index,
+    )
+
+    # Map percentiles onto screened_pool (by index)
+    # If your index is not stable/unique, consider adding a unique key column and joining on it.
+    screened_pct = screened_pool.join(pct_ref_pct_df, how="left")
 
     # =========================
     # Apply AND screening across metrics
     # =========================
-    mask = pd.Series(True, index=cohort.index)
+    mask = pd.Series(True, index=screened_pct.index)
 
     for metric in sel_metrics:
         low, high = thresholds[metric]
         pcol = f"{metric} pctl"
-        mask &= pct_df[pcol].between(low, high, inclusive="both") & pct_df[pcol].notna()
+        # Conservative: NaN fails screening
+        mask &= screened_pct[pcol].between(low, high, inclusive="both") & screened_pct[pcol].notna()
 
-    screened = cohort.loc[mask].copy()
-    screened = screened.join(pct_df, how="left")
+    result = screened_pct.loc[mask].copy()
 
-    if screened.empty:
+    if result.empty:
         st.warning("No players met all thresholds. Widen percentile ranges or change metrics.")
         st.stop()
 
@@ -255,24 +291,24 @@ def render_player_screening(
     # =========================
     base_cols = []
     for c in [player_col, team_col, league_col, position_col, age_col, minutes_col]:
-        if c in screened.columns:
+        if c in result.columns:
             base_cols.append(c)
 
     raw_metric_cols = sel_metrics
     pctl_cols = [f"{m} pctl" for m in sel_metrics]
 
-    screened["Avg pctl"] = screened[pctl_cols].mean(axis=1)
+    result["Avg pctl"] = result[pctl_cols].mean(axis=1)
     display_cols = base_cols + ["Avg pctl"] + raw_metric_cols + pctl_cols
 
-    screened = screened.sort_values("Avg pctl", ascending=False)
+    result = result.sort_values("Avg pctl", ascending=False)
 
     st.dataframe(
-        screened[display_cols],
+        result[display_cols],
         use_container_width=True,
         hide_index=True,
     )
 
-    csv = screened[display_cols].to_csv(index=False).encode("utf-8")
+    csv = result[display_cols].to_csv(index=False).encode("utf-8")
     st.download_button(
         "Download screened players (CSV)",
         data=csv,
