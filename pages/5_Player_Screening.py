@@ -497,16 +497,18 @@ def render_player_screening(
         ),
         polar=dict(
             bgcolor="white",
-            radialaxis=dict(
-                visible=True,
-                range=[0, 100],
-                tickmode="array",
-                tickvals=[0, 20, 40, 60, 80, 100],
-                ticks="",
-                showline=False,
-                gridcolor="rgba(0,0,0,0.18)",
-                tickfont=dict(size=11),
-            ),
+           radialaxis=dict(
+    visible=True,
+    range=[0, 100],
+    tickmode="array",
+    tickvals=[0, 20, 40, 60, 80, 100],
+    ticks="",
+    showline=True,                 # ✅ draw the outer ring boundary
+    linewidth=2,                   # ✅ make boundary visible
+    linecolor="rgba(0,0,0,0.35)",  # ✅ stronger than grid
+    gridcolor="rgba(0,0,0,0.18)",
+    tickfont=dict(size=11),
+),
             angularaxis=dict(
                 rotation=90,
                 direction="clockwise",
