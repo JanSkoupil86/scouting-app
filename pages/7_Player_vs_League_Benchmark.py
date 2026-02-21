@@ -93,7 +93,7 @@ def render_benchmark_page(
         "Benchmark a player against their league (and optionally position-filtered cohort).\n\n"
         "Outputs:\n"
         "- Table: player value vs cohort median/mean, delta, z-score, percentile\n"
-        "- Radar: player percentiles across selected metrics\n"
+        "- Radar: player vs cohort baseline (Percentiles or Z-scores) with raw + median in hover\n"
         "- Distribution: selected metric distribution with player marker\n"
     )
 
@@ -105,7 +105,7 @@ def render_benchmark_page(
         df[matches_col] = _safe_num(df[matches_col])
 
     # -----------------------------
-    # Filters (choose player first, then benchmark cohort)
+    # Select player
     # -----------------------------
     st.subheader("Select player")
 
@@ -138,7 +138,6 @@ def render_benchmark_page(
         player_pool = player_pool[player_pool[position_col].isin(filter_positions)]
     if player_search.strip():
         q = player_search.strip().lower()
-        # search across player + team
         player_pool = player_pool[
             player_pool[player_col].astype(str).str.lower().str.contains(q, na=False)
             | player_pool[team_col].astype(str).str.lower().str.contains(q, na=False)
@@ -176,7 +175,7 @@ def render_benchmark_page(
     )
 
     # -----------------------------
-    # Define benchmark cohort
+    # Benchmark cohort
     # -----------------------------
     st.subheader("Benchmark cohort")
 
@@ -188,7 +187,6 @@ def render_benchmark_page(
         key="pb_mode",
     )
 
-    # Default cohort league = player's league
     default_league = [base[league_col]] if pd.notna(base[league_col]) else (leagues[:1] if leagues else [])
     bench_leagues = st.multiselect(
         "League(s) for benchmark cohort",
@@ -307,7 +305,7 @@ def render_benchmark_page(
         st.info("Select at least one metric.")
         st.stop()
 
-    # Directions (session-persistent)
+    # Directions
     if "pb_directions" not in st.session_state:
         st.session_state.pb_directions = {}
     for m in sel_metrics:
@@ -332,32 +330,23 @@ def render_benchmark_page(
     # -----------------------------
     # Compute benchmark table
     # -----------------------------
-    # Build a direction-adjusted cohort series per metric for percentile calc
     rows = []
     for m in sel_metrics:
         cohort_s = _safe_num(cohort[m])
         player_val = _safe_num(pd.Series([base.get(m, np.nan)])).iloc[0]
 
-        # direction adjustment for percentile and z interpretation
         adj = -1.0 if directions.get(m, "higher") == "lower" else 1.0
         cohort_adj = cohort_s * adj
         player_adj = player_val * adj
 
-        # basic stats on raw (not adjusted) for reporting
         cohort_mean = float(np.nanmean(cohort_s.values)) if cohort_s.notna().any() else np.nan
         cohort_median = float(np.nanmedian(cohort_s.values)) if cohort_s.notna().any() else np.nan
         cohort_std = float(np.nanstd(cohort_s.values, ddof=0)) if cohort_s.notna().any() else np.nan
 
-        # z-score computed on raw scale (but flip sign so higher-z always "better")
         z_raw = _zscore(float(player_val), cohort_mean, cohort_std)
         z_better = z_raw * (1.0 if directions.get(m, "higher") == "higher" else -1.0)
 
-        # percentile computed on adjusted
         if cohort_adj.notna().sum() >= 3 and np.isfinite(player_adj):
-            # rank percentile: proportion <= player
-            pctl = float(pd.Series(cohort_adj).rank(pct=True).loc[cohort_adj.index].mean())  # placeholder safety
-            # compute percentile properly: rank player among cohort
-            # Using numpy: percentile = % of cohort <= player
             pctl = float(np.mean(cohort_adj.values <= player_adj) * 100.0)
         else:
             pctl = np.nan
@@ -381,14 +370,11 @@ def render_benchmark_page(
 
     bench = pd.DataFrame(rows)
 
-    # rounding / formatting
     for c in ["Player", "Cohort median", "Cohort mean", "Δ vs median", "Δ vs mean", "Z (better+)", "Percentile (better+)"]:
         bench[c] = pd.to_numeric(bench[c], errors="coerce")
 
     bench["Percentile (better+)"] = bench["Percentile (better+)"].round(0)
     bench["Z (better+)"] = bench["Z (better+)"].round(2)
-
-    # keep player/cohort values at 2dp
     for c in ["Player", "Cohort median", "Cohort mean", "Δ vs median", "Δ vs mean"]:
         bench[c] = bench[c].round(2)
 
@@ -405,9 +391,18 @@ def render_benchmark_page(
     )
 
     # -----------------------------
-    # Radar: player percentiles
+    # Radar: direct comparison (Percentiles or Z)
     # -----------------------------
-    st.subheader("Radar (percentiles)")
+    st.subheader("Radar (direct comparison)")
+
+    radar_scale = st.radio(
+        "Radar scale",
+        options=["Percentiles", "Z-scores"],
+        index=0,
+        horizontal=True,
+        key="pb_radar_scale",
+    )
+    show_baseline = st.checkbox("Show cohort baseline", value=True, key="pb_radar_baseline")
 
     radar_metrics = st.multiselect(
         "Radar metrics",
@@ -419,52 +414,133 @@ def render_benchmark_page(
         st.info("Select at least one radar metric.")
         return
 
-    # Compute percentiles for radar metrics (better+)
-    radar_vals = []
+    radar_rows = []
     for m in radar_metrics:
-        cohort_s = _safe_num(cohort[m])
-        player_val = _safe_num(pd.Series([base.get(m, np.nan)])).iloc[0]
+        cohort_s_raw = _safe_num(cohort[m]).dropna()
+        player_raw = _safe_num(pd.Series([base.get(m, np.nan)])).iloc[0]
+
+        if cohort_s_raw.empty or not np.isfinite(player_raw):
+            cohort_median = np.nan
+            cohort_mean = np.nan
+            cohort_std = np.nan
+        else:
+            cohort_median = float(np.nanmedian(cohort_s_raw.values))
+            cohort_mean = float(np.nanmean(cohort_s_raw.values))
+            cohort_std = float(np.nanstd(cohort_s_raw.values, ddof=0))
+
         adj = -1.0 if directions.get(m, "higher") == "lower" else 1.0
-        cohort_adj = cohort_s * adj
-        player_adj = player_val * adj
+        cohort_adj = cohort_s_raw * adj
+        player_adj = player_raw * adj
+
         if cohort_adj.notna().sum() >= 3 and np.isfinite(player_adj):
             pctl = float(np.mean(cohort_adj.values <= player_adj) * 100.0)
         else:
             pctl = np.nan
-        radar_vals.append(pctl)
 
-    # Close loop
+        z_raw = _zscore(float(player_raw), cohort_mean, cohort_std)
+        z_better = z_raw * (1.0 if directions.get(m, "higher") == "higher" else -1.0)
+
+        radar_rows.append(
+            dict(
+                Metric=m,
+                Player_raw=float(player_raw) if np.isfinite(player_raw) else np.nan,
+                Cohort_median=float(cohort_median) if np.isfinite(cohort_median) else np.nan,
+                Percentile=float(pctl) if np.isfinite(pctl) else np.nan,
+                Z=float(z_better) if np.isfinite(z_better) else np.nan,
+            )
+        )
+
+    radar_df = pd.DataFrame(radar_rows)
+
+    if radar_scale == "Percentiles":
+        player_r = radar_df["Percentile"].tolist()
+        baseline_r = [50.0] * len(radar_metrics)
+        r_range = [0, 100]
+        hover_r_label = "Percentile"
+    else:
+        player_r = radar_df["Z"].tolist()
+        baseline_r = [0.0] * len(radar_metrics)
+        max_abs = np.nanmax(np.abs(radar_df["Z"].values)) if radar_df["Z"].notna().any() else 2.0
+        max_abs = float(np.clip(max_abs, 1.5, 4.0))
+        r_range = [-max_abs, max_abs]
+        hover_r_label = "Z-score"
+
     categories = radar_metrics[:]
     categories_closed = categories + [categories[0]]
-    values_closed = radar_vals + [radar_vals[0]]
+    player_closed = player_r + [player_r[0]]
+    baseline_closed = baseline_r + [baseline_r[0]]
+
+    hover_text = []
+    for _, r in radar_df.iterrows():
+        if np.isfinite(r["Player_raw"]):
+            p_raw = f"{r['Player_raw']:.2f}"
+        else:
+            p_raw = "—"
+        if np.isfinite(r["Cohort_median"]):
+            c_med = f"{r['Cohort_median']:.2f}"
+        else:
+            c_med = "—"
+        if np.isfinite(r["Percentile"]):
+            pctl_txt = f"{r['Percentile']:.0f}"
+        else:
+            pctl_txt = "—"
+        if np.isfinite(r["Z"]):
+            z_txt = f"{r['Z']:.2f}"
+        else:
+            z_txt = "—"
+
+        hover_text.append(
+            f"Player: {p_raw}<br>"
+            f"Cohort median: {c_med}<br>"
+            f"Percentile: {pctl_txt}<br>"
+            f"Z-score: {z_txt}"
+        )
+    hover_text_closed = hover_text + [hover_text[0]]
 
     fig = go.Figure()
+
+    # Player trace
     fig.add_trace(
         go.Scatterpolar(
-            r=values_closed,
+            r=player_closed,
             theta=categories_closed,
             mode="lines",
             fill="toself",
             fillcolor=px.colors.qualitative.Bold[0],
             line=dict(color=px.colors.qualitative.Bold[0], width=3),
             opacity=0.35,
-            name="Player percentile",
-            hovertemplate="%{theta}<br>%{r:.0f} pctl<extra></extra>",
+            name="Player",
+            text=hover_text_closed,
+            hovertemplate="%{theta}<br>"
+            + hover_r_label
+            + ": %{r}<br>%{text}<extra></extra>",
         )
     )
 
+    # Baseline trace (median percentile baseline or z=0 baseline)
+    if show_baseline:
+        fig.add_trace(
+            go.Scatterpolar(
+                r=baseline_closed,
+                theta=categories_closed,
+                mode="lines",
+                fill="none",
+                line=dict(color=px.colors.qualitative.Bold[1], width=3, dash="dash"),
+                name="Cohort baseline",
+                hovertemplate="%{theta}<br>Baseline: %{r}<extra></extra>",
+            )
+        )
+
     fig.update_layout(
-        height=760,
+        height=780,
         margin=dict(l=90, r=90, t=120, b=120),
         showlegend=True,
-        legend=dict(orientation="h", yanchor="bottom", y=1.10, xanchor="left", x=0),
+        legend=dict(orientation="h", yanchor="bottom", y=1.12, xanchor="left", x=0),
         polar=dict(
             bgcolor="white",
             radialaxis=dict(
                 visible=True,
-                range=[0, 100],
-                tickmode="array",
-                tickvals=[0, 20, 40, 60, 80, 100],
+                range=r_range,
                 ticks="",
                 showline=True,
                 linewidth=2,
@@ -483,7 +559,16 @@ def render_benchmark_page(
             ),
         ),
     )
+
     st.plotly_chart(fig, use_container_width=True)
+
+    with st.expander("Show numeric values (player vs cohort median)", expanded=False):
+        t = radar_df[["Metric", "Player_raw", "Cohort_median", "Percentile", "Z"]].copy()
+        t["Player_raw"] = pd.to_numeric(t["Player_raw"], errors="coerce").round(2)
+        t["Cohort_median"] = pd.to_numeric(t["Cohort_median"], errors="coerce").round(2)
+        t["Percentile"] = pd.to_numeric(t["Percentile"], errors="coerce").round(0)
+        t["Z"] = pd.to_numeric(t["Z"], errors="coerce").round(2)
+        st.dataframe(t, use_container_width=True, hide_index=True)
 
     # -----------------------------
     # Distribution plot for one metric
@@ -504,7 +589,6 @@ def render_benchmark_page(
         st.info("Distribution cannot be displayed for this metric (missing data).")
         return
 
-    # Histogram + player marker
     hist = go.Figure()
     hist.add_trace(go.Histogram(x=cohort_s.values, nbinsx=30, opacity=0.75, name="Cohort"))
     hist.add_vline(x=float(player_val), line_width=3, line_dash="solid", annotation_text="Player", annotation_position="top")
