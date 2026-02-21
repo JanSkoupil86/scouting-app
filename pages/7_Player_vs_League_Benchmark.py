@@ -558,40 +558,6 @@ def render_benchmark_page(
         t["Z"] = pd.to_numeric(t["Z"], errors="coerce").round(2)
         st.dataframe(t, use_container_width=True, hide_index=True)
 
-    # -----------------------------
-    # Distribution plot for one metric
-    # -----------------------------
-    st.subheader("Metric distribution (cohort)")
-
-    dist_metric = st.selectbox(
-        "Select metric to view distribution",
-        options=sel_metrics,
-        index=0,
-        key="pb_dist_metric",
-    )
-
-    cohort_s = _safe_num(cohort[dist_metric]).dropna()
-    player_val = _safe_num(pd.Series([base.get(dist_metric, np.nan)])).iloc[0]
-
-    if cohort_s.empty or not np.isfinite(player_val):
-        st.info("Distribution cannot be displayed for this metric (missing data).")
-        return
-
-    hist = go.Figure()
-    hist.add_trace(go.Histogram(x=cohort_s.values, nbinsx=30, opacity=0.75, name="Cohort"))
-    hist.add_vline(x=float(player_val), line_width=3, line_dash="solid", annotation_text="Player", annotation_position="top")
-
-    hist.update_layout(
-        height=420,
-        margin=dict(l=40, r=20, t=40, b=40),
-        showlegend=False,
-        xaxis_title=dist_metric,
-        yaxis_title="Count",
-    )
-
-    st.plotly_chart(hist, use_container_width=True)
-
-
 # -----------------------------
 # Page entrypoint
 # -----------------------------
