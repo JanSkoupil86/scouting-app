@@ -9,6 +9,21 @@ import plotly.express as px
 
 
 # -----------------------------
+# KPI Templates (Option 1: hard-coded)
+# - You can expand this dict as you upload KPI screens for other positions.
+# -----------------------------
+KPI_TEMPLATES: dict[str, dict[str, list[str]]] = {
+    "LW": {
+        "Dribbling – ATT 1v1": ["Dribbles per 90", "Successful dribbles, %", "Offensive duels won, %"],
+        "Speed": ["Progressive runs per 90", "Accelerations per 90", "Touches in box per 90"],
+        "Positioning - inverting": ["Touches in box per 90", "xG per 90", "Key passes per 90"],
+        "Crossing": ["Crosses per 90", "Accurate crosses, %", "Deep completed crosses per 90"],
+        "Defending in mid/low block": ["Successful defensive actions per 90", "Defensive duels per 90", "Defensive duels won, %"],
+    }
+}
+
+
+# -----------------------------
 # Utilities
 # -----------------------------
 def _first_existing_df_from_session(keys: list[str]) -> pd.DataFrame | None:
@@ -74,6 +89,35 @@ def _zscore(x: float, mean: float, std: float) -> float:
     return (x - mean) / std
 
 
+def _template_positions_from_data(df: pd.DataFrame, position_col: str) -> list[str]:
+    """
+    We keep template keys short like 'LW', but your dataset may have 'LW', 'LWF', 'Left winger', etc.
+    For now: use template keys as-is and let user select.
+    """
+    return sorted(list(KPI_TEMPLATES.keys()))
+
+
+def _coerce_template_to_available_metrics(
+    template: dict[str, list[str]],
+    available_metrics: set[str],
+) -> dict[str, list[str]]:
+    fixed = {}
+    for kpi, metrics in template.items():
+        fixed[kpi] = [m for m in metrics if m in available_metrics]
+    return fixed
+
+
+def _union_metrics(kpi_map: dict[str, list[str]]) -> list[str]:
+    out = []
+    seen = set()
+    for _, ms in kpi_map.items():
+        for m in ms:
+            if m not in seen:
+                seen.add(m)
+                out.append(m)
+    return out
+
+
 # -----------------------------
 # Page
 # -----------------------------
@@ -90,7 +134,8 @@ def render_benchmark_page(
 ):
     st.title("Player vs League Benchmark")
     st.markdown(
-        "Benchmark a player against their league (and optionally position-filtered cohort).\n\n"
+        "Benchmark a player against a cohort. Use **manual metric selection** or a **KPI template** (per position) "
+        "that you can override in the UI.\n\n"
         "Outputs:\n"
         "- Table: player value vs cohort median/mean, delta, z-score, percentile\n"
         "- Radar: player vs cohort baseline (Percentiles or Z-scores) with raw + median in hover\n"
@@ -203,18 +248,12 @@ def render_benchmark_page(
         )
 
     age_all = df[age_col]
-    if age_all.notna().any():
-        age_min = int(np.nanmin(age_all.values))
-        age_max = int(np.nanmax(age_all.values))
-    else:
-        age_min, age_max = 0, 60
+    age_min = int(np.nanmin(age_all.values)) if age_all.notna().any() else 0
+    age_max = int(np.nanmax(age_all.values)) if age_all.notna().any() else 60
 
     minutes_all = df[minutes_col]
-    if minutes_all.notna().any():
-        min_min = int(np.nanmin(minutes_all.values))
-        min_max = int(np.nanmax(minutes_all.values))
-    else:
-        min_min, min_max = 0, 0
+    min_min = int(np.nanmin(minutes_all.values)) if minutes_all.notna().any() else 0
+    min_max = int(np.nanmax(minutes_all.values)) if minutes_all.notna().any() else 0
 
     cA, cB = st.columns([2, 2])
     with cA:
@@ -262,10 +301,8 @@ def render_benchmark_page(
     )
 
     # -----------------------------
-    # Metrics selection + direction
+    # Metrics universe
     # -----------------------------
-    st.subheader("Metrics")
-
     exclude = {league_col, position_col, age_col, minutes_col, player_col, team_col}
     if matches_col:
         exclude.add(matches_col)
@@ -274,7 +311,26 @@ def render_benchmark_page(
     if not metric_candidates:
         st.error("No numeric metrics available.")
         st.stop()
+    metric_set = set(metric_candidates)
 
+    # -----------------------------
+    # KPI templates vs manual selection
+    # -----------------------------
+    st.subheader("Role KPIs and metrics")
+
+    metric_mode = st.radio(
+        "Metric selection mode",
+        options=["Use KPI template", "Manual metrics"],
+        index=0,
+        horizontal=True,
+        key="pb_metric_mode",
+    )
+
+    # Session override storage: position_key -> kpi list (as list of dicts for stable ordering)
+    if "pb_kpi_overrides" not in st.session_state:
+        st.session_state.pb_kpi_overrides = {}
+
+    # Default manual metrics
     preferred_defaults = [
         "xG per 90",
         "xA per 90",
@@ -284,31 +340,139 @@ def render_benchmark_page(
         "Progressive runs per 90",
         "Touches in box per 90",
         "Dribbles per 90",
-        "Successful defensive actions per 90",
-        "Defensive duels won, %",
     ]
-    default_metrics = [m for m in preferred_defaults if m in metric_candidates]
-    if not default_metrics:
-        default_metrics = metric_candidates[:8]
+    default_manual = [m for m in preferred_defaults if m in metric_set]
+    if not default_manual:
+        default_manual = metric_candidates[:8]
 
-    sel_metrics = st.multiselect(
-        "Select benchmark metrics (table)",
-        options=metric_candidates,
-        default=default_metrics[: min(10, len(default_metrics))],
-        key="pb_metrics",
-    )
-    if not sel_metrics:
-        st.info("Select at least one metric.")
-        st.stop()
+    # Determine a default template position: try to match base position if key exists
+    template_positions = _template_positions_from_data(df, position_col)
+    base_pos_str = str(base.get(position_col, "")).strip()
+    default_template_pos = base_pos_str if base_pos_str in template_positions else (template_positions[0] if template_positions else "LW")
 
-    # Directions store: used by both table and radar
+    selected_template_pos = None
+    kpi_map_effective: dict[str, list[str]] = {}
+    sel_metrics: list[str] = []
+
+    if metric_mode == "Manual metrics":
+        sel_metrics = st.multiselect(
+            "Select benchmark metrics (table)",
+            options=metric_candidates,
+            default=default_manual[: min(12, len(default_manual))],
+            key="pb_metrics_manual",
+        )
+        if not sel_metrics:
+            st.info("Select at least one metric.")
+            st.stop()
+
+        # For radar: start from same, but can select anything later
+        st.info("Radar metrics can be selected independently below (from all dataset metrics).")
+
+    else:
+        if not template_positions:
+            st.warning("No KPI templates available yet. Switch to Manual metrics.")
+            st.stop()
+
+        selected_template_pos = st.selectbox(
+            "Choose KPI template (position)",
+            options=template_positions,
+            index=template_positions.index(default_template_pos) if default_template_pos in template_positions else 0,
+            key="pb_template_pos",
+        )
+
+        # Load base template and remove non-existent metrics
+        base_template = KPI_TEMPLATES.get(selected_template_pos, {})
+        base_template = _coerce_template_to_available_metrics(base_template, metric_set)
+
+        # Initialize override from template (once per position)
+        if selected_template_pos not in st.session_state.pb_kpi_overrides:
+            # keep order stable
+            st.session_state.pb_kpi_overrides[selected_template_pos] = [
+                {"kpi": kpi_name, "metrics": metrics[:]} for kpi_name, metrics in base_template.items()
+            ]
+
+        # Controls
+        cX, cY, cZ = st.columns([1.2, 1.2, 1.2])
+        with cX:
+            apply_to_table = st.checkbox("Apply KPIs to benchmark table", value=True, key="pb_apply_kpi_table")
+        with cY:
+            apply_to_radar_default = st.checkbox("Apply KPIs as default radar metrics", value=True, key="pb_apply_kpi_radar")
+        with cZ:
+            reset = st.button("Reset KPIs to template defaults", use_container_width=True, key="pb_kpi_reset")
+
+        if reset:
+            st.session_state.pb_kpi_overrides[selected_template_pos] = [
+                {"kpi": kpi_name, "metrics": metrics[:]} for kpi_name, metrics in base_template.items()
+            ]
+
+        st.markdown("Edit KPI names and assign metrics (2–3 recommended per KPI).")
+
+        overrides = st.session_state.pb_kpi_overrides[selected_template_pos]
+
+        # Render KPI blocks
+        for i, block in enumerate(overrides):
+            with st.expander(f"KPI {i+1}: {block['kpi']}", expanded=True):
+                new_name = st.text_input(
+                    "KPI name",
+                    value=block["kpi"],
+                    key=f"pb_kpi_name__{selected_template_pos}__{i}",
+                )
+                block["kpi"] = new_name.strip() if new_name.strip() else block["kpi"]
+
+                chosen = st.multiselect(
+                    "Assign metrics",
+                    options=metric_candidates,
+                    default=[m for m in block.get("metrics", []) if m in metric_set],
+                    key=f"pb_kpi_metrics__{selected_template_pos}__{i}",
+                )
+                block["metrics"] = chosen
+
+        # Persist changes back
+        st.session_state.pb_kpi_overrides[selected_template_pos] = overrides
+
+        # Build effective KPI map + union metrics
+        kpi_map_effective = {b["kpi"]: b.get("metrics", []) for b in overrides if b.get("kpi")}
+        template_union = _union_metrics(kpi_map_effective)
+
+        if apply_to_table:
+            sel_metrics = template_union[:]
+            if not sel_metrics:
+                st.warning("No KPI metrics selected. Assign metrics to KPIs or switch to Manual metrics.")
+                st.stop()
+        else:
+            # allow manual pick even in KPI mode
+            sel_metrics = st.multiselect(
+                "Select benchmark metrics (table) — manual override",
+                options=metric_candidates,
+                default=template_union[: min(12, len(template_union))] if template_union else default_manual,
+                key="pb_metrics_kpi_manual_override",
+            )
+            if not sel_metrics:
+                st.info("Select at least one metric.")
+                st.stop()
+
+        # Optional: show what KPIs resolve to
+        with st.expander("Show KPI → metrics mapping", expanded=False):
+            for kpi, ms in kpi_map_effective.items():
+                st.write(f"**{kpi}**: {', '.join(ms) if ms else '—'}")
+
+        # Store default radar set for later use
+        if apply_to_radar_default:
+            st.session_state["pb_radar_default_from_kpi"] = template_union[:]
+        else:
+            st.session_state["pb_radar_default_from_kpi"] = None
+
+    # -----------------------------
+    # Directions store (table + radar)
+    # -----------------------------
     if "pb_directions" not in st.session_state:
         st.session_state.pb_directions = {}
+
     for m in sel_metrics:
         if m not in st.session_state.pb_directions:
             st.session_state.pb_directions[m] = _default_direction_for_metric(m)
 
-    with st.expander("Metric direction (higher/lower is better)", expanded=False):
+    with st.expander("Metric direction (higher/lower is better) — for table metrics", expanded=False):
         cols = st.columns(2)
         for i, m in enumerate(sel_metrics):
             with cols[i % 2]:
@@ -316,7 +480,7 @@ def render_benchmark_page(
                     m,
                     options=["Higher is better", "Lower is better"],
                     index=0 if st.session_state.pb_directions[m] == "higher" else 1,
-                    key=f"pb_dir__{m}",
+                    key=f"pb_dir__table__{m}",
                     horizontal=True,
                 )
                 st.session_state.pb_directions[m] = "higher" if choice == "Higher is better" else "lower"
@@ -365,7 +529,6 @@ def render_benchmark_page(
         )
 
     bench = pd.DataFrame(rows)
-
     for c in ["Player", "Cohort median", "Cohort mean", "Δ vs median", "Δ vs mean", "Z (better+)", "Percentile (better+)"]:
         bench[c] = pd.to_numeric(bench[c], errors="coerce")
 
@@ -387,7 +550,7 @@ def render_benchmark_page(
     )
 
     # -----------------------------
-    # Radar: direct comparison (Percentiles or Z) — radar metrics from ALL dataset metrics
+    # Radar: direct comparison (Percentiles or Z) — metrics from ALL dataset metrics
     # -----------------------------
     st.subheader("Radar (direct comparison)")
 
@@ -400,17 +563,25 @@ def render_benchmark_page(
     )
     show_baseline = st.checkbox("Show cohort baseline", value=True, key="pb_radar_baseline")
 
+    # Default radar metrics:
+    # - if KPI mode and user enabled "apply KPIs as default radar metrics" => use union
+    # - else use table metrics as default
+    radar_default = st.session_state.get("pb_radar_default_from_kpi", None)
+    if not radar_default:
+        radar_default = sel_metrics[:]
+    radar_default = [m for m in radar_default if m in metric_set][:12]
+
     radar_metrics = st.multiselect(
         "Radar metrics (any numeric metric)",
         options=metric_candidates,
-        default=sel_metrics[: min(10, len(sel_metrics))],
+        default=radar_default,
         key="pb_radar_metrics",
     )
     if not radar_metrics:
         st.info("Select at least one radar metric.")
         return
 
-    # Ensure direction settings exist for radar-only metrics (and let users keep them persistently)
+    # Ensure direction settings exist for radar-only metrics
     for m in radar_metrics:
         if m not in st.session_state.pb_directions:
             st.session_state.pb_directions[m] = _default_direction_for_metric(m)
