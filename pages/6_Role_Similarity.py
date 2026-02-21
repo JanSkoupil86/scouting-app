@@ -33,10 +33,6 @@ def _numeric_metric_candidates(df: pd.DataFrame, exclude_cols: set[str]) -> list
 
 
 def _default_direction_for_metric(metric_name: str) -> str:
-    """
-    Heuristic: return 'lower' for metrics that are typically "bad when high".
-    Extend this as your schema grows.
-    """
     m = metric_name.strip().lower()
     lower_tokens = [
         "foul",
@@ -73,41 +69,22 @@ def _safe_to_numeric(s: pd.Series) -> pd.Series:
 
 
 def _cosine_similarity_matrix(X: np.ndarray, b: np.ndarray) -> np.ndarray:
-    """
-    Cosine similarity between each row of X and vector b.
-    Returns shape (n,).
-    """
-    # Dot
     dot = X @ b
-    # Norms
     X_norm = np.linalg.norm(X, axis=1)
     b_norm = np.linalg.norm(b)
     denom = X_norm * (b_norm if b_norm != 0 else np.nan)
     sim = dot / denom
-    # handle zeros / nans
     sim = np.where(np.isfinite(sim), sim, np.nan)
     return sim
 
 
-def _top_k_metric_explain(
-    base_pctl: pd.Series,
-    cand_pctl: pd.Series,
-    k: int = 3,
-) -> tuple[str, str]:
-    """
-    Returns (best_matches_str, biggest_diffs_str) based on absolute percentile deltas.
-    """
-    delta = (cand_pctl - base_pctl).abs()
-    delta = delta.dropna()
+def _top_k_metric_explain(base_pctl: pd.Series, cand_pctl: pd.Series, k: int = 3) -> tuple[str, str]:
+    delta = (cand_pctl - base_pctl).abs().dropna()
     if delta.empty:
         return ("", "")
-
     best = delta.nsmallest(min(k, len(delta))).index.tolist()
     worst = delta.nlargest(min(k, len(delta))).index.tolist()
-
-    best_str = ", ".join(best)
-    worst_str = ", ".join(worst)
-    return best_str, worst_str
+    return ", ".join(best), ", ".join(worst)
 
 
 # -----------------------------
@@ -126,8 +103,7 @@ def render_role_similarity_page(
     st.title("Role Similarity Finder")
     st.markdown(
         "Find players **similar to a target player** within selected leagues and **one or more positions**.\n\n"
-        "Similarity is computed using **direction-aware percentile profiles** and **cosine similarity** "
-        "(profile-shape matching)."
+        "Similarity uses **direction-aware percentile profiles** and **cosine similarity** (profile-shape matching)."
     )
 
     # -----------------------------
@@ -139,7 +115,6 @@ def render_role_similarity_page(
         st.error("No numeric metrics found to compute similarity.")
         st.stop()
 
-    # Sensible defaults for your schema
     preferred_defaults = [
         "xG per 90",
         "xA per 90",
@@ -180,17 +155,17 @@ def render_role_similarity_page(
             key="rs_positions",
         )
 
-    # Age slider bounds
-    age_series = _safe_to_numeric(df[age_col])
-    if age_series.notna().any():
-        age_min = int(np.nanmin(age_series.values))
-        age_max = int(np.nanmax(age_series.values))
+    # Age bounds (for cohort)
+    age_series_all = _safe_to_numeric(df[age_col])
+    if age_series_all.notna().any():
+        age_min = int(np.nanmin(age_series_all.values))
+        age_max = int(np.nanmax(age_series_all.values))
     else:
         age_min, age_max = 0, 60
 
     with c3:
         age_range = st.slider(
-            "Age range",
+            "Age range (cohort)",
             min_value=age_min,
             max_value=age_max,
             value=(age_min, age_max),
@@ -198,11 +173,11 @@ def render_role_similarity_page(
             key="rs_age_range",
         )
 
-    # Minutes slider bounds
-    min_series = _safe_to_numeric(df[minutes_col])
-    if min_series.notna().any():
-        min_min = int(np.nanmin(min_series.values))
-        min_max = int(np.nanmax(min_series.values))
+    # Minutes bounds
+    min_series_all = _safe_to_numeric(df[minutes_col])
+    if min_series_all.notna().any():
+        min_min = int(np.nanmin(min_series_all.values))
+        min_max = int(np.nanmax(min_series_all.values))
     else:
         min_min, min_max = 0, 0
 
@@ -244,7 +219,7 @@ def render_role_similarity_page(
         st.stop()
 
     # -----------------------------
-    # Base player selection (from cohort)
+    # Target player selection (from cohort)
     # -----------------------------
     st.subheader("Target player")
 
@@ -261,7 +236,6 @@ def render_role_similarity_page(
         key="rs_base_player",
     )
 
-    # Identify base row (first match)
     base_idx = cohort.index[cohort["_player_key"] == base_key]
     if len(base_idx) == 0:
         st.error("Could not locate the selected player in the cohort.")
@@ -269,7 +243,7 @@ def render_role_similarity_page(
     base_idx = base_idx[0]
 
     # -----------------------------
-    # Metric selection, directions, weights
+    # Metrics, directions, weights
     # -----------------------------
     st.subheader("Feature space (metrics)")
 
@@ -280,7 +254,7 @@ def render_role_similarity_page(
         key="rs_metrics",
     )
     if not sel_metrics or len(sel_metrics) < 3:
-        st.info("Select at least 3 metrics to compute a stable similarity.")
+        st.info("Select at least 3 metrics to compute stable similarity.")
         st.stop()
 
     # Directions
@@ -318,23 +292,14 @@ def render_role_similarity_page(
             w_cols = st.columns(2)
             for i, m in enumerate(sel_metrics):
                 with w_cols[i % 2]:
-                    w = st.slider(
-                        m,
-                        min_value=0.0,
-                        max_value=5.0,
-                        value=1.0,
-                        step=0.1,
-                        key=f"rs_w__{m}",
-                    )
+                    w = st.slider(m, 0.0, 5.0, 1.0, 0.1, key=f"rs_w__{m}")
                     weights[i] = float(w)
-
-        # Avoid all-zero
         if np.all(weights == 0):
             st.warning("All weights are 0. Resetting to equal weights.")
             weights = np.ones(len(sel_metrics), dtype=float)
 
-    # Missingness control
-    cA, cB, cC = st.columns([1.2, 1.2, 1.2])
+    # Similarity controls + NEW results age filter
+    cA, cB, cC, cD = st.columns([1.2, 1.0, 1.0, 1.4])
     with cA:
         min_coverage = st.slider(
             "Min metric coverage",
@@ -346,16 +311,27 @@ def render_role_similarity_page(
             help="Players missing too many metric values are excluded before similarity.",
         )
     with cB:
-        top_n = st.slider("Top N results", 5, 50, 25, 1, key="rs_top_n")
+        top_n = st.slider("Top N results", 5, 100, 25, 1, key="rs_top_n")
     with cC:
         exclude_same_team = st.checkbox("Exclude same team", value=False, key="rs_excl_team")
 
-    # -----------------------------
-    # Build direction-aware percentile feature matrix (0..100)
-    # -----------------------------
-    # Compute percentile ranks within the cohort (after direction adjustment).
-    pctl = pd.DataFrame(index=cohort.index)
+    with cD:
+        # ✅ Results-only age filter (does NOT affect similarity computation)
+        apply_result_age = st.checkbox("Filter results by age (e.g. U25)", value=False, key="rs_apply_result_age")
+        result_age_max = st.slider(
+            "Max age in results",
+            min_value=age_min,
+            max_value=age_max,
+            value=min(25, age_max),
+            step=1,
+            key="rs_result_age_max",
+            disabled=not apply_result_age,
+        )
 
+    # -----------------------------
+    # Build direction-aware percentile matrix (0..100)
+    # -----------------------------
+    pctl = pd.DataFrame(index=cohort.index)
     for m in sel_metrics:
         s = _safe_to_numeric(cohort[m])
         if directions.get(m, "higher") == "lower":
@@ -367,7 +343,6 @@ def render_role_similarity_page(
     keep = coverage >= float(min_coverage)
     pctl = pctl.loc[keep].copy()
 
-    # Ensure base player survives filtering
     if base_idx not in pctl.index:
         st.warning(
             "The selected base player is missing too many selected metrics under the current coverage threshold. "
@@ -375,55 +350,51 @@ def render_role_similarity_page(
         )
         st.stop()
 
-    # Median imputation (percentiles) for remaining missing values
+    # Median imputation
     med = pctl.median(axis=0, skipna=True)
     pctl = pctl.fillna(med)
 
-    # Prepare similarity vectors
-    # Scale to 0..1 and apply weights
+    # Weighted vectors in 0..1
     X = (pctl[sel_metrics].to_numpy(dtype=float) / 100.0)
-    w = weights.copy().astype(float)
-    # Normalize weights to keep scale stable
+    w = weights.astype(float).copy()
     if np.sum(w) > 0:
         w = w / np.sum(w)
     Xw = X * w
-
-    # Base vector
     b = (pctl.loc[base_idx, sel_metrics].to_numpy(dtype=float) / 100.0) * w
 
     # Cosine similarity
     sim = _cosine_similarity_matrix(Xw, b)
     sim_series = pd.Series(sim, index=pctl.index, name="cos_sim")
 
-    # Drop base player
+    # Exclude base
     sim_series = sim_series.drop(index=base_idx, errors="ignore")
 
-    # Optional: exclude same team as base
+    # Optional: exclude same team
     if exclude_same_team and team_col in cohort.columns:
         base_team = str(cohort.loc[base_idx, team_col])
         same_team_idx = cohort.index[cohort[team_col].astype(str) == base_team]
         sim_series = sim_series.drop(index=same_team_idx, errors="ignore")
 
-    # Sort
     sim_series = sim_series.dropna().sort_values(ascending=False)
 
     if sim_series.empty:
         st.warning("No comparable players after filtering. Broaden filters or relax coverage.")
         st.stop()
 
-    # Build results table
+    # -----------------------------
+    # Build results table (Top N first, then apply results age filter)
+    # -----------------------------
     top_idx = sim_series.head(int(top_n)).index
-    out = cohort.loc[top_idx, [player_col, team_col, league_col, position_col, age_col, minutes_col]].copy()
 
+    out = cohort.loc[top_idx, [player_col, team_col, league_col, position_col, age_col, minutes_col]].copy()
     out[age_col] = _safe_to_numeric(out[age_col])
     out[minutes_col] = _safe_to_numeric(out[minutes_col])
 
     out["Similarity"] = (sim_series.loc[top_idx].values * 100.0).clip(0, 100)
 
-    # Explainability: best matches / biggest diffs
+    # Explainability
     base_pctl = pctl.loc[base_idx, sel_metrics]
-    best_list = []
-    worst_list = []
+    best_list, worst_list = [], []
     for idx in top_idx:
         cand_pctl = pctl.loc[idx, sel_metrics]
         best, worst = _top_k_metric_explain(base_pctl, cand_pctl, k=3)
@@ -432,25 +403,41 @@ def render_role_similarity_page(
 
     out["Best matches"] = best_list
     out["Biggest diffs"] = worst_list
-
-    # Add a key for selection/radar
     out["_player_key"] = cohort.loc[top_idx, "_player_key"].values
 
-    # Format
+    # ✅ Apply results-only age filter (U25 etc.)
+    if apply_result_age:
+        out = out[out[age_col].notna() & (out[age_col] <= float(result_age_max))].copy()
+
+    if out.empty:
+        st.warning("No results left after applying the results age filter. Increase the max age or disable it.")
+        st.stop()
+
+    # Formatting
     out["Similarity"] = pd.to_numeric(out["Similarity"], errors="coerce").round(1)
-    if age_col in out.columns:
-        out[age_col] = pd.to_numeric(out[age_col], errors="coerce").round(0)
-    if minutes_col in out.columns:
-        out[minutes_col] = pd.to_numeric(out[minutes_col], errors="coerce").round(0)
+    out[age_col] = pd.to_numeric(out[age_col], errors="coerce").round(0)
+    out[minutes_col] = pd.to_numeric(out[minutes_col], errors="coerce").round(0)
 
     st.subheader("Most similar players")
     st.dataframe(
-        out[["_player_key", "Similarity", player_col, team_col, league_col, position_col, age_col, minutes_col, "Best matches", "Biggest diffs"]],
+        out[
+            [
+                "_player_key",
+                "Similarity",
+                player_col,
+                team_col,
+                league_col,
+                position_col,
+                age_col,
+                minutes_col,
+                "Best matches",
+                "Biggest diffs",
+            ]
+        ],
         use_container_width=True,
         hide_index=True,
     )
 
-    # Download
     csv = out.drop(columns=["_player_key"], errors="ignore").to_csv(index=False).encode("utf-8")
     st.download_button(
         "Download similarity results (CSV)",
@@ -465,7 +452,6 @@ def render_role_similarity_page(
     # -----------------------------
     st.subheader("Radar comparison")
 
-    # Choose radar metrics (default: selected metrics, capped)
     radar_metrics = st.multiselect(
         "Radar metrics",
         options=sel_metrics,
@@ -476,7 +462,6 @@ def render_role_similarity_page(
         st.info("Select at least one radar metric.")
         return
 
-    # Choose players for radar: base + up to 4 from results
     candidates_for_radar = out["_player_key"].tolist()
     default_radar = candidates_for_radar[:2] if len(candidates_for_radar) >= 2 else candidates_for_radar[:1]
 
@@ -485,24 +470,16 @@ def render_role_similarity_page(
         options=candidates_for_radar,
         default=default_radar,
         key="rs_radar_players",
-    )
-    chosen_similar = chosen_similar[:4]
+    )[:4]
 
-    # Build radar dataframe with percentiles
-    # Use pctl (already imputed) so radar is stable
-    radar_cols = radar_metrics[:]
-    radar_pctl = pctl[radar_cols].copy()
+    # Build radar pctl from pctl (already imputed)
+    radar_pctl = pctl[radar_metrics].copy()
 
-    # Build plotting set: base + chosen
     plot_rows = []
-
-    # base row
-    base_row = cohort.loc[base_idx].copy()
-    base_label = f"BASE: {base_row['_player_key']}"
+    base_label = f"BASE: {cohort.loc[base_idx, '_player_key']}"
     plot_rows.append((base_idx, base_label))
 
-    # similar rows
-    key_to_idx = {cohort.loc[i, "_player_key"]: i for i in out.index}
+    key_to_idx = {cohort.loc[i, "_player_key"]: i for i in cohort.index}
     for k in chosen_similar:
         idx = key_to_idx.get(k)
         if idx is not None and idx in radar_pctl.index:
@@ -512,15 +489,14 @@ def render_role_similarity_page(
         st.info("Select at least one similar player to compare with the base player.")
         return
 
-    # Styled radar (high contrast + visible 100 ring)
     color_palette = px.colors.qualitative.Bold
     fig = go.Figure()
 
-    categories = radar_cols[:]
+    categories = radar_metrics[:]
     categories_closed = categories + [categories[0]]
 
     for i, (idx, label) in enumerate(plot_rows):
-        vals = [float(radar_pctl.loc[idx, m]) for m in radar_cols]
+        vals = [float(radar_pctl.loc[idx, m]) for m in radar_metrics]
         vals_closed = vals + [vals[0]]
 
         color = color_palette[i % len(color_palette)]
@@ -558,7 +534,7 @@ def render_role_similarity_page(
                 tickmode="array",
                 tickvals=[0, 20, 40, 60, 80, 100],
                 ticks="",
-                showline=True,                 # outer ring boundary
+                showline=True,
                 linewidth=2,
                 linecolor="rgba(0,0,0,0.40)",
                 gridcolor="rgba(0,0,0,0.18)",
@@ -591,7 +567,6 @@ if df_shared is None:
     st.info("No dataset loaded. Go to **Home** and upload/select your data first.")
     st.stop()
 
-# Auto-detect columns (Wyscout-ish)
 league_col = _pick_col(df_shared, ["League", "Competition", "league"])
 position_col = _pick_col(df_shared, ["Specific Position", "Main Position", "Position"])
 age_col = _pick_col(df_shared, ["Age"])
