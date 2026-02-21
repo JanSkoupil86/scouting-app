@@ -4,6 +4,7 @@
 import numpy as np
 import pandas as pd
 import streamlit as st
+import plotly.graph_objects as go
 
 
 # -----------------------------
@@ -33,11 +34,10 @@ def _pick_col(df: pd.DataFrame, candidates: list[str]) -> str | None:
 def _default_direction_for_metric(metric_name: str) -> str:
     """
     Heuristic: return 'lower' for metrics that are typically "bad when high".
-    You can extend this list anytime.
+    Extend this list as your schema grows.
     """
     m = metric_name.strip().lower()
 
-    # "Bad when high" tokens (broad but useful)
     lower_tokens = [
         "foul",
         "yellow",
@@ -57,13 +57,16 @@ def _default_direction_for_metric(metric_name: str) -> str:
         "penalty conceded",
         "goals against",
     ]
+    return "lower" if any(tok in m for tok in lower_tokens) else "higher"
 
-    # If metric contains any token, default to lower-is-better
-    if any(tok in m for tok in lower_tokens):
-        return "lower"
 
-    # Default assumption
-    return "higher"
+def _make_player_key(row: pd.Series, player_col: str, team_col: str, league_col: str, position_col: str) -> str:
+    p = str(row.get(player_col, "")).strip()
+    t = str(row.get(team_col, "")).strip()
+    l = str(row.get(league_col, "")).strip()
+    pos = str(row.get(position_col, "")).strip()
+    # Compact but informative
+    return f"{p} — {t} ({l}, {pos})"
 
 
 # -----------------------------
@@ -113,7 +116,7 @@ def render_player_screening(
         st.warning("No numeric metrics available for screening (after exclusions).")
         st.stop()
 
-    # ---- default metrics tuned to your dataset column names
+    # ---- default metrics (tuned to your schema)
     if default_metrics is None:
         preferred = [
             "xG per 90",
@@ -239,7 +242,7 @@ def render_player_screening(
     )
 
     # =========================
-    # Metrics & thresholds
+    # Metrics, directions, thresholds
     # =========================
     st.subheader("Metrics & Screening thresholds")
 
@@ -254,18 +257,16 @@ def render_player_screening(
         st.info("Select at least one metric to screen players.")
         st.stop()
 
-    # ---- Direction control (NEW)
+    # ---- Direction control
     st.markdown("**Metric direction (higher/lower is better):**")
 
     if "ps_directions" not in st.session_state:
         st.session_state.ps_directions = {}
 
-    # Optional: one-click auto-fill for any newly added metrics
     for m in sel_metrics:
         if m not in st.session_state.ps_directions:
             st.session_state.ps_directions[m] = _default_direction_for_metric(m)
 
-    # Compact UI in an expander to avoid clutter
     with st.expander("Set metric directions", expanded=False):
         cols = st.columns(2)
         for i, m in enumerate(sel_metrics):
@@ -315,13 +316,9 @@ def render_player_screening(
     pct_cols = {}
     for metric in sel_metrics:
         s = pd.to_numeric(pct_ref[metric], errors="coerce")
-
-        # Direction-aware: invert for lower-is-better
         if directions.get(metric, "higher") == "lower":
-            s = -s
-
-        pct = s.rank(pct=True, method="average") * 100.0
-        pct_cols[metric] = pct
+            s = -s  # invert so "lower is better" maps to higher percentile
+        pct_cols[metric] = s.rank(pct=True, method="average") * 100.0
 
     pct_ref_pct_df = pd.DataFrame(
         {f"{m} pctl": pct_cols[m] for m in sel_metrics},
@@ -334,7 +331,6 @@ def render_player_screening(
     # Apply AND screening across metrics
     # =========================
     mask = pd.Series(True, index=screened_pct.index)
-
     for metric in sel_metrics:
         low, high = thresholds[metric]
         pcol = f"{metric} pctl"
@@ -347,28 +343,33 @@ def render_player_screening(
         st.stop()
 
     # =========================
-    # Output table
+    # Output table + Heatmap styling
     # =========================
-    base_cols = []
-    for c in [player_col, team_col, league_col, position_col, age_col, minutes_col]:
-        if c in result.columns:
-            base_cols.append(c)
-
-    raw_metric_cols = sel_metrics
+    base_cols = [c for c in [player_col, team_col, league_col, position_col, age_col, minutes_col] if c in result.columns]
     pctl_cols = [f"{m} pctl" for m in sel_metrics]
 
     result["Avg pctl"] = result[pctl_cols].mean(axis=1)
-    display_cols = base_cols + ["Avg pctl"] + raw_metric_cols + pctl_cols
-
+    display_cols = base_cols + ["Avg pctl"] + sel_metrics + pctl_cols
     result = result.sort_values("Avg pctl", ascending=False)
 
-    st.dataframe(
-        result[display_cols],
-        use_container_width=True,
-        hide_index=True,
-    )
+    st.subheader("Screened players (heatmap percentiles)")
 
-    csv = result[display_cols].to_csv(index=False).encode("utf-8")
+    # Format for display
+    disp = result[display_cols].copy()
+    for c in pctl_cols + ["Avg pctl"]:
+        if c in disp.columns:
+            disp[c] = pd.to_numeric(disp[c], errors="coerce").round(0)
+
+    # Pandas Styler heatmap for percentile columns
+    styler = disp.style
+    heat_cols = [c for c in (["Avg pctl"] + pctl_cols) if c in disp.columns]
+    if heat_cols:
+        styler = styler.background_gradient(subset=heat_cols, axis=None, cmap="RdYlGn")
+        styler = styler.format({c: "{:.0f}" for c in heat_cols})
+
+    st.dataframe(styler, use_container_width=True, hide_index=True)
+
+    csv = disp.to_csv(index=False).encode("utf-8")
     st.download_button(
         "Download screened players (CSV)",
         data=csv,
@@ -376,6 +377,101 @@ def render_player_screening(
         mime="text/csv",
         key="ps_download_csv",
     )
+
+    # =========================
+    # Radar comparison (NEW)
+    # =========================
+    st.subheader("Radar comparison (screened players)")
+
+    # Build a stable label for selecting players
+    radar_df = result.copy()
+    radar_df["_player_key"] = radar_df.apply(
+        lambda r: _make_player_key(r, player_col, team_col, league_col, position_col), axis=1
+    )
+
+    # Keep only what we need (percentiles)
+    radar_cols = ["_player_key"] + base_cols + ["Avg pctl"] + pctl_cols
+    radar_df = radar_df[radar_cols].copy()
+
+    # Select players
+    player_options = radar_df["_player_key"].tolist()
+
+    cA, cB = st.columns([2, 1])
+    with cA:
+        selected_players = st.multiselect(
+            "Select up to 5 players to compare",
+            options=player_options,
+            default=player_options[:2] if len(player_options) >= 2 else player_options[:1],
+            key="ps_radar_players",
+        )
+    with cB:
+        max_players = st.number_input(
+            "Max players",
+            min_value=1,
+            max_value=5,
+            value=5,
+            step=1,
+            key="ps_radar_max_players",
+        )
+
+    if len(selected_players) > int(max_players):
+        st.warning(f"Please select at most {int(max_players)} players.")
+        selected_players = selected_players[: int(max_players)]
+
+    if not selected_players:
+        st.info("Select at least one player to display the radar.")
+        return
+
+    # Radar metric selection (defaults to screening metrics)
+    radar_metric_options = sel_metrics[:]  # show raw metric names; we plot their percentile columns
+    radar_metrics = st.multiselect(
+        "Radar metrics",
+        options=radar_metric_options,
+        default=radar_metric_options[: min(8, len(radar_metric_options))],
+        key="ps_radar_metrics",
+    )
+
+    if not radar_metrics:
+        st.info("Select at least one radar metric.")
+        return
+
+    radar_pctl_cols = [f"{m} pctl" for m in radar_metrics]
+    categories = radar_metrics[:]  # axis labels
+
+    # Build figure
+    fig = go.Figure()
+
+    sub = radar_df[radar_df["_player_key"].isin(selected_players)].copy()
+    # Ensure numeric
+    for c in radar_pctl_cols:
+        sub[c] = pd.to_numeric(sub[c], errors="coerce")
+
+    for _, row in sub.iterrows():
+        values = [row.get(f"{m} pctl", np.nan) for m in radar_metrics]
+        # close the loop
+        values_closed = values + [values[0]]
+        categories_closed = categories + [categories[0]]
+
+        fig.add_trace(
+            go.Scatterpolar(
+                r=values_closed,
+                theta=categories_closed,
+                fill="none",
+                name=row["_player_key"],
+                hovertemplate="%{theta}<br>%{r:.0f} pctl<extra></extra>",
+            )
+        )
+
+    fig.update_layout(
+        polar=dict(
+            radialaxis=dict(visible=True, range=[0, 100]),
+        ),
+        showlegend=True,
+        height=650,
+        margin=dict(l=30, r=30, t=30, b=30),
+    )
+
+    st.plotly_chart(fig, use_container_width=True)
 
 
 # -----------------------------
