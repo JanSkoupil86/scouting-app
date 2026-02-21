@@ -5,6 +5,7 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 import plotly.graph_objects as go
+import plotly.express as px
 
 
 # -----------------------------
@@ -355,20 +356,15 @@ def render_player_screening(
     disp = result[display_cols].copy()
 
     # --- Formatting rules ---
-    # Age -> integer
     if age_col in disp.columns:
         disp[age_col] = pd.to_numeric(disp[age_col], errors="coerce").round(0)
-
-    # Minutes -> integer
     if minutes_col in disp.columns:
         disp[minutes_col] = pd.to_numeric(disp[minutes_col], errors="coerce").round(0)
 
-    # Percentiles -> integer
     for c in pctl_cols + ["Avg pctl"]:
         if c in disp.columns:
             disp[c] = pd.to_numeric(disp[c], errors="coerce").round(0)
 
-    # Metrics -> 2 decimals
     for c in sel_metrics:
         if c in disp.columns:
             disp[c] = pd.to_numeric(disp[c], errors="coerce").round(2)
@@ -379,7 +375,6 @@ def render_player_screening(
     if heat_cols:
         styler = styler.background_gradient(subset=heat_cols, axis=None, cmap="RdYlGn")
 
-    # Explicit formatting map
     format_dict = {}
     if age_col in disp.columns:
         format_dict[age_col] = "{:.0f}"
@@ -404,83 +399,125 @@ def render_player_screening(
         key="ps_download_csv",
     )
 
-   # =========================
-# Styled Radar (Improved)
-# =========================
+    # =========================
+    # Radar comparison (stronger contrast + lower position)
+    # =========================
+    st.subheader("Radar comparison (screened players)")
 
-import plotly.express as px
-
-fig = go.Figure()
-
-sub = radar_df[radar_df["_player_key"].isin(selected_players)].copy()
-for c in radar_pctl_cols:
-    sub[c] = pd.to_numeric(sub[c], errors="coerce")
-
-categories = radar_metrics[:]
-categories_closed = categories + [categories[0]]
-
-# Strong contrasting qualitative palette
-color_palette = px.colors.qualitative.Bold  # high contrast
-# Alternative options:
-# px.colors.qualitative.Dark24
-# px.colors.qualitative.Set1
-# px.colors.qualitative.Vivid
-
-for i, (_, row) in enumerate(sub.iterrows()):
-    values = [row.get(f"{m} pctl", np.nan) for m in radar_metrics]
-    values_closed = values + [values[0]]
-
-    color = color_palette[i % len(color_palette)]
-
-    fig.add_trace(
-        go.Scatterpolar(
-            r=values_closed,
-            theta=categories_closed,
-            mode="lines",
-            fill="toself",
-            fillcolor=color,
-            line=dict(color=color, width=3),
-            opacity=0.35,              # stronger contrast
-            name=row["_player_key"],
-            hovertemplate="%{theta}<br>%{r:.0f} pctl<extra></extra>",
-        )
+    radar_df = result.copy()
+    radar_df["_player_key"] = radar_df.apply(
+        lambda r: _make_player_key(r, player_col, team_col, league_col, position_col), axis=1
     )
 
-fig.update_layout(
-    height=750,                       # slightly taller
-    margin=dict(l=90, r=90, t=100, b=120),  # more top & bottom margin
-    showlegend=True,
-    legend=dict(
-        orientation="h",
-        yanchor="bottom",
-        y=1.10,
-        xanchor="left",
-        x=0,
-        font=dict(size=11),
-    ),
-    polar=dict(
-        bgcolor="white",
-        radialaxis=dict(
-            visible=True,
-            range=[0, 100],
-            tickmode="array",
-            tickvals=[0, 20, 40, 60, 80, 100],
-            ticks="",
-            showline=False,
-            gridcolor="rgba(0,0,0,0.18)",
-            tickfont=dict(size=11),
-        ),
-        angularaxis=dict(
-            rotation=90,                 # keep top start
-            direction="clockwise",
-            showline=False,
-            gridcolor="rgba(0,0,0,0.15)",
-            tickfont=dict(size=13),      # slightly bigger labels
-        ),
-    ),
-)
+    player_options = radar_df["_player_key"].tolist()
 
-st.plotly_chart(fig, use_container_width=True)
+    cA, cB = st.columns([2, 1])
+    with cA:
+        selected_players = st.multiselect(
+            "Select up to 5 players to compare",
+            options=player_options,
+            default=player_options[:2] if len(player_options) >= 2 else player_options[:1],
+            key="ps_radar_players",
+        )
+    with cB:
+        max_players = st.number_input(
+            "Max players",
+            min_value=1,
+            max_value=5,
+            value=5,
+            step=1,
+            key="ps_radar_max_players",
+        )
+
+    if len(selected_players) > int(max_players):
+        st.warning(f"Please select at most {int(max_players)} players.")
+        selected_players = selected_players[: int(max_players)]
+
+    if not selected_players:
+        st.info("Select at least one player to display the radar.")
+        return
+
+    radar_metric_options = sel_metrics[:]
+    radar_metrics = st.multiselect(
+        "Radar metrics",
+        options=radar_metric_options,
+        default=radar_metric_options[: min(10, len(radar_metric_options))],
+        key="ps_radar_metrics",
+    )
+
+    if not radar_metrics:
+        st.info("Select at least one radar metric.")
+        return
+
+    radar_pctl_cols = [f"{m} pctl" for m in radar_metrics]
+
+    # Strong contrasting palette
+    color_palette = px.colors.qualitative.Bold
+
+    fig = go.Figure()
+
+    sub = radar_df[radar_df["_player_key"].isin(selected_players)].copy()
+    for c in radar_pctl_cols:
+        sub[c] = pd.to_numeric(sub[c], errors="coerce")
+
+    categories = radar_metrics[:]
+    categories_closed = categories + [categories[0]]
+
+    for i, (_, row) in enumerate(sub.iterrows()):
+        values = [row.get(f"{m} pctl", np.nan) for m in radar_metrics]
+        values_closed = values + [values[0]]
+
+        color = color_palette[i % len(color_palette)]
+
+        fig.add_trace(
+            go.Scatterpolar(
+                r=values_closed,
+                theta=categories_closed,
+                mode="lines",
+                fill="toself",
+                fillcolor=color,
+                line=dict(color=color, width=3),
+                opacity=0.35,
+                name=row["_player_key"],
+                hovertemplate="%{theta}<br>%{r:.0f} pctl<extra></extra>",
+            )
+        )
+
+    fig.update_layout(
+        height=750,
+        margin=dict(l=90, r=90, t=110, b=120),
+        showlegend=True,
+        legend=dict(
+            orientation="h",
+            yanchor="bottom",
+            y=1.10,
+            xanchor="left",
+            x=0,
+            font=dict(size=11),
+        ),
+        polar=dict(
+            bgcolor="white",
+            radialaxis=dict(
+                visible=True,
+                range=[0, 100],
+                tickmode="array",
+                tickvals=[0, 20, 40, 60, 80, 100],
+                ticks="",
+                showline=False,
+                gridcolor="rgba(0,0,0,0.18)",
+                tickfont=dict(size=11),
+            ),
+            angularaxis=dict(
+                rotation=90,
+                direction="clockwise",
+                showline=False,
+                gridcolor="rgba(0,0,0,0.15)",
+                tickfont=dict(size=13),
+            ),
+        ),
+    )
+
+    st.plotly_chart(fig, use_container_width=True)
 
 
 # -----------------------------
