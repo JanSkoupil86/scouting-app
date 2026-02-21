@@ -341,7 +341,7 @@ def render_player_screening(
         st.stop()
 
     # =========================
-    # Output table + Heatmap styling
+    # Output table + Heatmap styling (UPDATED formatting)
     # =========================
     base_cols = [c for c in [player_col, team_col, league_col, position_col, age_col, minutes_col] if c in result.columns]
     pctl_cols = [f"{m} pctl" for m in sel_metrics]
@@ -353,16 +353,45 @@ def render_player_screening(
     st.subheader("Screened players (heatmap percentiles)")
 
     disp = result[display_cols].copy()
+
+    # --- Formatting rules ---
+    # Age -> integer
+    if age_col in disp.columns:
+        disp[age_col] = pd.to_numeric(disp[age_col], errors="coerce").round(0)
+
+    # Minutes -> integer
+    if minutes_col in disp.columns:
+        disp[minutes_col] = pd.to_numeric(disp[minutes_col], errors="coerce").round(0)
+
+    # Percentiles -> integer
     for c in pctl_cols + ["Avg pctl"]:
         if c in disp.columns:
             disp[c] = pd.to_numeric(disp[c], errors="coerce").round(0)
 
-    # Heatmap styling via Styler
+    # Metrics -> 2 decimals
+    for c in sel_metrics:
+        if c in disp.columns:
+            disp[c] = pd.to_numeric(disp[c], errors="coerce").round(2)
+
+    # --- Styling ---
     styler = disp.style
     heat_cols = [c for c in (["Avg pctl"] + pctl_cols) if c in disp.columns]
     if heat_cols:
         styler = styler.background_gradient(subset=heat_cols, axis=None, cmap="RdYlGn")
-        styler = styler.format({c: "{:.0f}" for c in heat_cols})
+
+    # Explicit formatting map
+    format_dict = {}
+    if age_col in disp.columns:
+        format_dict[age_col] = "{:.0f}"
+    if minutes_col in disp.columns:
+        format_dict[minutes_col] = "{:.0f}"
+    for c in sel_metrics:
+        if c in disp.columns:
+            format_dict[c] = "{:.2f}"
+    for c in heat_cols:
+        format_dict[c] = "{:.0f}"
+
+    styler = styler.format(format_dict)
 
     st.dataframe(styler, use_container_width=True, hide_index=True)
 
@@ -376,7 +405,7 @@ def render_player_screening(
     )
 
     # =========================
-    # Radar comparison (styled like your example)
+    # Radar comparison (styled)
     # =========================
     st.subheader("Radar comparison (screened players)")
 
@@ -427,7 +456,6 @@ def render_player_screening(
 
     radar_pctl_cols = [f"{m} pctl" for m in radar_metrics]
 
-    # Styled radar: filled polygons + clean grid
     fig = go.Figure()
 
     sub = radar_df[radar_df["_player_key"].isin(selected_players)].copy()
@@ -445,10 +473,10 @@ def render_player_screening(
             go.Scatterpolar(
                 r=values_closed,
                 theta=categories_closed,
-                mode="lines",          # no markers
-                fill="toself",         # filled area
-                opacity=0.25,          # soft fill
-                line=dict(width=2),    # stronger outline
+                mode="lines",
+                fill="toself",
+                opacity=0.25,
+                line=dict(width=2),
                 name=row["_player_key"],
                 hovertemplate="%{theta}<br>%{r:.0f} pctl<extra></extra>",
             )
