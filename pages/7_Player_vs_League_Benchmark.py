@@ -94,7 +94,6 @@ def render_benchmark_page(
         "Outputs:\n"
         "- Table: player value vs cohort median/mean, delta, z-score, percentile\n"
         "- Radar: player vs cohort baseline (Percentiles or Z-scores) with raw + median in hover\n"
-        "- Distribution: selected metric distribution with player marker\n"
     )
 
     # Ensure numeric parsing for core columns
@@ -293,7 +292,7 @@ def render_benchmark_page(
         default_metrics = metric_candidates[:8]
 
     sel_metrics = st.multiselect(
-        "Select benchmark metrics",
+        "Select benchmark metrics (table)",
         options=metric_candidates,
         default=default_metrics[: min(10, len(default_metrics))],
         key="pb_metrics",
@@ -302,7 +301,7 @@ def render_benchmark_page(
         st.info("Select at least one metric.")
         st.stop()
 
-    # Directions for selected metrics (and later radar metrics)
+    # Directions store: used by both table and radar
     if "pb_directions" not in st.session_state:
         st.session_state.pb_directions = {}
     for m in sel_metrics:
@@ -322,7 +321,7 @@ def render_benchmark_page(
                 )
                 st.session_state.pb_directions[m] = "higher" if choice == "Higher is better" else "lower"
 
-    directions = {m: st.session_state.pb_directions[m] for m in sel_metrics}
+    directions_table = {m: st.session_state.pb_directions[m] for m in sel_metrics}
 
     # -----------------------------
     # Compute benchmark table
@@ -332,7 +331,7 @@ def render_benchmark_page(
         cohort_s = _safe_num(cohort[m])
         player_val = _safe_num(pd.Series([base.get(m, np.nan)])).iloc[0]
 
-        adj = -1.0 if directions.get(m, "higher") == "lower" else 1.0
+        adj = -1.0 if directions_table.get(m, "higher") == "lower" else 1.0
         cohort_adj = cohort_s * adj
         player_adj = player_val * adj
 
@@ -341,7 +340,7 @@ def render_benchmark_page(
         cohort_std = float(np.nanstd(cohort_s.values, ddof=0)) if cohort_s.notna().any() else np.nan
 
         z_raw = _zscore(float(player_val), cohort_mean, cohort_std)
-        z_better = z_raw * (1.0 if directions.get(m, "higher") == "higher" else -1.0)
+        z_better = z_raw * (1.0 if directions_table.get(m, "higher") == "higher" else -1.0)
 
         if cohort_adj.notna().sum() >= 3 and np.isfinite(player_adj):
             pctl = float(np.mean(cohort_adj.values <= player_adj) * 100.0)
@@ -354,7 +353,7 @@ def render_benchmark_page(
         rows.append(
             {
                 "Metric": m,
-                "Direction": "Higher" if directions.get(m, "higher") == "higher" else "Lower",
+                "Direction": "Higher" if directions_table.get(m, "higher") == "higher" else "Lower",
                 "Player": player_val,
                 "Cohort median": cohort_median,
                 "Cohort mean": cohort_mean,
@@ -401,9 +400,8 @@ def render_benchmark_page(
     )
     show_baseline = st.checkbox("Show cohort baseline", value=True, key="pb_radar_baseline")
 
-    # ✅ Now allow radar metrics from ALL numeric metrics
     radar_metrics = st.multiselect(
-        "Radar metrics",
+        "Radar metrics (any numeric metric)",
         options=metric_candidates,
         default=sel_metrics[: min(10, len(sel_metrics))],
         key="pb_radar_metrics",
@@ -412,11 +410,10 @@ def render_benchmark_page(
         st.info("Select at least one radar metric.")
         return
 
-    # Ensure direction settings exist for radar-only metrics
+    # Ensure direction settings exist for radar-only metrics (and let users keep them persistently)
     for m in radar_metrics:
         if m not in st.session_state.pb_directions:
             st.session_state.pb_directions[m] = _default_direction_for_metric(m)
-
     radar_directions = {m: st.session_state.pb_directions[m] for m in radar_metrics}
 
     radar_rows = []
@@ -557,6 +554,7 @@ def render_benchmark_page(
         t["Percentile"] = pd.to_numeric(t["Percentile"], errors="coerce").round(0)
         t["Z"] = pd.to_numeric(t["Z"], errors="coerce").round(2)
         st.dataframe(t, use_container_width=True, hide_index=True)
+
 
 # -----------------------------
 # Page entrypoint
