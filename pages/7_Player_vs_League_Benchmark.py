@@ -10,7 +10,6 @@ import plotly.express as px
 
 # -----------------------------
 # KPI Templates (Option 1: hard-coded)
-# - You can expand this dict as you upload KPI screens for other positions.
 # -----------------------------
 KPI_TEMPLATES: dict[str, dict[str, list[str]]] = {
     "LW": {
@@ -89,14 +88,6 @@ def _zscore(x: float, mean: float, std: float) -> float:
     return (x - mean) / std
 
 
-def _template_positions_from_data(df: pd.DataFrame, position_col: str) -> list[str]:
-    """
-    We keep template keys short like 'LW', but your dataset may have 'LW', 'LWF', 'Left winger', etc.
-    For now: use template keys as-is and let user select.
-    """
-    return sorted(list(KPI_TEMPLATES.keys()))
-
-
 def _coerce_template_to_available_metrics(
     template: dict[str, list[str]],
     available_metrics: set[str],
@@ -118,6 +109,104 @@ def _union_metrics(kpi_map: dict[str, list[str]]) -> list[str]:
     return out
 
 
+def _build_group_spans(radar_metrics: list[str], metric_to_group: dict[str, str]) -> list[dict]:
+    """
+    Build contiguous KPI spans in the current radar_metrics order.
+    Returns list of {"group": name, "start": idx, "end": idx} for contiguous segments.
+    """
+    spans = []
+    current_group = None
+    start = 0
+    for i, m in enumerate(radar_metrics):
+        g = metric_to_group.get(m, None)
+        if current_group is None:
+            current_group = g
+            start = i
+            continue
+        if g != current_group:
+            spans.append({"group": current_group, "start": start, "end": i - 1})
+            current_group = g
+            start = i
+    spans.append({"group": current_group, "start": start, "end": len(radar_metrics) - 1})
+    # remove None groups
+    spans = [s for s in spans if s["group"]]
+    return spans
+
+
+def _angle_for_index(i: int, n: int, rotation_deg: float = 90.0, clockwise: bool = True) -> float:
+    """
+    Return angle in degrees (standard math: 0 at +x, CCW positive) for the i-th category.
+    Our plot uses angularaxis.rotation=90, direction='clockwise'.
+    """
+    step = 360.0 / float(n) if n else 0.0
+    if clockwise:
+        return rotation_deg - i * step
+    return rotation_deg + i * step
+
+
+def _add_kpi_group_labels_to_radar(
+    fig: go.Figure,
+    radar_metrics: list[str],
+    spans: list[dict],
+    *,
+    rotation_deg: float = 90.0,
+    clockwise: bool = True,
+    label_radius: float = 0.49,
+    center: tuple[float, float] = (0.5, 0.5),
+    show_separators: bool = True,
+):
+    """
+    Adds KPI group labels (and optional separators) around the radar.
+    Uses paper coordinates for annotations.
+    """
+    n = len(radar_metrics)
+    if n == 0 or not spans:
+        return
+
+    cx, cy = center
+
+    # separators: radial lines at group boundaries
+    if show_separators:
+        boundary_indices = sorted({s["start"] for s in spans} | {s["end"] + 1 for s in spans if s["end"] + 1 < n})
+        for bi in boundary_indices:
+            ang = _angle_for_index(bi, n, rotation_deg=rotation_deg, clockwise=clockwise)
+            fig.add_trace(
+                go.Scatterpolar(
+                    r=[0, 100],
+                    theta=[ang, ang],
+                    mode="lines",
+                    line=dict(width=2, dash="dot"),
+                    opacity=0.35,
+                    showlegend=False,
+                    hoverinfo="skip",
+                )
+            )
+
+    # labels at span midpoints
+    for s in spans:
+        mid = (s["start"] + s["end"]) / 2.0
+        ang = _angle_for_index(mid, n, rotation_deg=rotation_deg, clockwise=clockwise)
+        ang_rad = np.deg2rad(ang)
+
+        x = cx + label_radius * np.cos(ang_rad)
+        y = cy + label_radius * np.sin(ang_rad)
+
+        fig.add_annotation(
+            x=x,
+            y=y,
+            xref="paper",
+            yref="paper",
+            text=f"<b>{s['group']}</b>",
+            showarrow=False,
+            font=dict(size=13),
+            align="center",
+            bgcolor="rgba(255,255,255,0.75)",
+            bordercolor="rgba(0,0,0,0.10)",
+            borderwidth=1,
+            borderpad=4,
+        )
+
+
 # -----------------------------
 # Page
 # -----------------------------
@@ -133,13 +222,6 @@ def render_benchmark_page(
     matches_col: str | None = None,
 ):
     st.title("Player vs League Benchmark")
-    st.markdown(
-        "Benchmark a player against a cohort. Use **manual metric selection** or a **KPI template** (per position) "
-        "that you can override in the UI.\n\n"
-        "Outputs:\n"
-        "- Table: player value vs cohort median/mean, delta, z-score, percentile\n"
-        "- Radar: player vs cohort baseline (Percentiles or Z-scores) with raw + median in hover\n"
-    )
 
     # Ensure numeric parsing for core columns
     df = df.copy()
@@ -291,15 +373,6 @@ def render_benchmark_page(
         st.warning("Benchmark cohort is too small. Broaden leagues/positions or relax filters.")
         st.stop()
 
-    st.caption(
-        f"Benchmark cohort size: {len(cohort):,} | "
-        f"Mode: {mode} | "
-        f"Leagues: {len(bench_leagues)} | "
-        f"Positions: {', '.join(bench_positions) if bench_positions else ('All' if mode=='Whole League' else 'None selected')} | "
-        f"Age: {age_range[0]}–{age_range[1]} | "
-        f"Minutes ≥ {min_minutes}"
-    )
-
     # -----------------------------
     # Metrics universe
     # -----------------------------
@@ -326,11 +399,9 @@ def render_benchmark_page(
         key="pb_metric_mode",
     )
 
-    # Session override storage: position_key -> kpi list (as list of dicts for stable ordering)
     if "pb_kpi_overrides" not in st.session_state:
         st.session_state.pb_kpi_overrides = {}
 
-    # Default manual metrics
     preferred_defaults = [
         "xG per 90",
         "xA per 90",
@@ -341,18 +412,10 @@ def render_benchmark_page(
         "Touches in box per 90",
         "Dribbles per 90",
     ]
-    default_manual = [m for m in preferred_defaults if m in metric_set]
-    if not default_manual:
-        default_manual = metric_candidates[:8]
+    default_manual = [m for m in preferred_defaults if m in metric_set] or metric_candidates[:8]
 
-    # Determine a default template position: try to match base position if key exists
-    template_positions = _template_positions_from_data(df, position_col)
-    base_pos_str = str(base.get(position_col, "")).strip()
-    default_template_pos = base_pos_str if base_pos_str in template_positions else (template_positions[0] if template_positions else "LW")
-
-    selected_template_pos = None
-    kpi_map_effective: dict[str, list[str]] = {}
-    sel_metrics: list[str] = []
+    # KPI mapping stored for radar group labels
+    st.session_state["pb_active_kpi_map"] = None  # reset each rerun
 
     if metric_mode == "Manual metrics":
         sel_metrics = st.multiselect(
@@ -364,14 +427,15 @@ def render_benchmark_page(
         if not sel_metrics:
             st.info("Select at least one metric.")
             st.stop()
-
-        # For radar: start from same, but can select anything later
-        st.info("Radar metrics can be selected independently below (from all dataset metrics).")
-
     else:
+        template_positions = sorted(list(KPI_TEMPLATES.keys()))
         if not template_positions:
             st.warning("No KPI templates available yet. Switch to Manual metrics.")
             st.stop()
+
+        # Default template position
+        base_pos_str = str(base.get(position_col, "")).strip()
+        default_template_pos = base_pos_str if base_pos_str in template_positions else template_positions[0]
 
         selected_template_pos = st.selectbox(
             "Choose KPI template (position)",
@@ -380,18 +444,14 @@ def render_benchmark_page(
             key="pb_template_pos",
         )
 
-        # Load base template and remove non-existent metrics
         base_template = KPI_TEMPLATES.get(selected_template_pos, {})
         base_template = _coerce_template_to_available_metrics(base_template, metric_set)
 
-        # Initialize override from template (once per position)
         if selected_template_pos not in st.session_state.pb_kpi_overrides:
-            # keep order stable
             st.session_state.pb_kpi_overrides[selected_template_pos] = [
                 {"kpi": kpi_name, "metrics": metrics[:]} for kpi_name, metrics in base_template.items()
             ]
 
-        # Controls
         cX, cY, cZ = st.columns([1.2, 1.2, 1.2])
         with cX:
             apply_to_table = st.checkbox("Apply KPIs to benchmark table", value=True, key="pb_apply_kpi_table")
@@ -405,11 +465,8 @@ def render_benchmark_page(
                 {"kpi": kpi_name, "metrics": metrics[:]} for kpi_name, metrics in base_template.items()
             ]
 
-        st.markdown("Edit KPI names and assign metrics (2–3 recommended per KPI).")
-
         overrides = st.session_state.pb_kpi_overrides[selected_template_pos]
 
-        # Render KPI blocks
         for i, block in enumerate(overrides):
             with st.expander(f"KPI {i+1}: {block['kpi']}", expanded=True):
                 new_name = st.text_input(
@@ -427,12 +484,13 @@ def render_benchmark_page(
                 )
                 block["metrics"] = chosen
 
-        # Persist changes back
         st.session_state.pb_kpi_overrides[selected_template_pos] = overrides
 
-        # Build effective KPI map + union metrics
         kpi_map_effective = {b["kpi"]: b.get("metrics", []) for b in overrides if b.get("kpi")}
         template_union = _union_metrics(kpi_map_effective)
+
+        # Save active KPI map for radar group labels
+        st.session_state["pb_active_kpi_map"] = kpi_map_effective
 
         if apply_to_table:
             sel_metrics = template_union[:]
@@ -440,7 +498,6 @@ def render_benchmark_page(
                 st.warning("No KPI metrics selected. Assign metrics to KPIs or switch to Manual metrics.")
                 st.stop()
         else:
-            # allow manual pick even in KPI mode
             sel_metrics = st.multiselect(
                 "Select benchmark metrics (table) — manual override",
                 options=metric_candidates,
@@ -451,16 +508,14 @@ def render_benchmark_page(
                 st.info("Select at least one metric.")
                 st.stop()
 
-        # Optional: show what KPIs resolve to
-        with st.expander("Show KPI → metrics mapping", expanded=False):
-            for kpi, ms in kpi_map_effective.items():
-                st.write(f"**{kpi}**: {', '.join(ms) if ms else '—'}")
-
-        # Store default radar set for later use
         if apply_to_radar_default:
             st.session_state["pb_radar_default_from_kpi"] = template_union[:]
         else:
             st.session_state["pb_radar_default_from_kpi"] = None
+
+        with st.expander("Show KPI → metrics mapping", expanded=False):
+            for kpi, ms in kpi_map_effective.items():
+                st.write(f"**{kpi}**: {', '.join(ms) if ms else '—'}")
 
     # -----------------------------
     # Directions store (table + radar)
@@ -550,7 +605,7 @@ def render_benchmark_page(
     )
 
     # -----------------------------
-    # Radar: direct comparison (Percentiles or Z) — metrics from ALL dataset metrics
+    # Radar: direct comparison + KPI group labels
     # -----------------------------
     st.subheader("Radar (direct comparison)")
 
@@ -563,12 +618,15 @@ def render_benchmark_page(
     )
     show_baseline = st.checkbox("Show cohort baseline", value=True, key="pb_radar_baseline")
 
-    # Default radar metrics:
-    # - if KPI mode and user enabled "apply KPIs as default radar metrics" => use union
-    # - else use table metrics as default
-    radar_default = st.session_state.get("pb_radar_default_from_kpi", None)
-    if not radar_default:
-        radar_default = sel_metrics[:]
+    cR1, cR2, cR3 = st.columns([1.3, 1.2, 1.5])
+    with cR1:
+        show_kpi_labels = st.checkbox("Show KPI group labels", value=True, key="pb_radar_kpi_labels")
+    with cR2:
+        show_kpi_separators = st.checkbox("Show KPI separators", value=True, key="pb_radar_kpi_seps")
+    with cR3:
+        kpi_label_radius = st.slider("KPI label distance", 0.42, 0.60, 0.49, 0.01, key="pb_radar_kpi_label_radius")
+
+    radar_default = st.session_state.get("pb_radar_default_from_kpi", None) or sel_metrics[:]
     radar_default = [m for m in radar_default if m in metric_set][:12]
 
     radar_metrics = st.multiselect(
@@ -581,7 +639,6 @@ def render_benchmark_page(
         st.info("Select at least one radar metric.")
         return
 
-    # Ensure direction settings exist for radar-only metrics
     for m in radar_metrics:
         if m not in st.session_state.pb_directions:
             st.session_state.pb_directions[m] = _default_direction_for_metric(m)
@@ -687,6 +744,10 @@ def render_benchmark_page(
             )
         )
 
+    # IMPORTANT: keep these rotation/direction values in sync with _angle_for_index
+    ROTATION = 90
+    CLOCKWISE = True
+
     fig.update_layout(
         height=780,
         margin=dict(l=90, r=90, t=120, b=120),
@@ -705,8 +766,8 @@ def render_benchmark_page(
                 tickfont=dict(size=11),
             ),
             angularaxis=dict(
-                rotation=90,
-                direction="clockwise",
+                rotation=ROTATION,
+                direction="clockwise" if CLOCKWISE else "counterclockwise",
                 showline=True,
                 linewidth=1,
                 linecolor="rgba(0,0,0,0.18)",
@@ -715,6 +776,28 @@ def render_benchmark_page(
             ),
         ),
     )
+
+    # Add KPI group labels if we have an active KPI mapping
+    active_kpi_map = st.session_state.get("pb_active_kpi_map", None)
+    if show_kpi_labels and isinstance(active_kpi_map, dict) and active_kpi_map:
+        metric_to_group = {}
+        # map each metric to its KPI (first match wins)
+        for kpi, ms in active_kpi_map.items():
+            for m in ms:
+                if m and m not in metric_to_group:
+                    metric_to_group[m] = kpi
+
+        spans = _build_group_spans(radar_metrics, metric_to_group)
+        if spans:
+            _add_kpi_group_labels_to_radar(
+                fig,
+                radar_metrics=radar_metrics,
+                spans=spans,
+                rotation_deg=float(ROTATION),
+                clockwise=bool(CLOCKWISE),
+                label_radius=float(kpi_label_radius),
+                show_separators=bool(show_kpi_separators),
+            )
 
     st.plotly_chart(fig, use_container_width=True)
 
